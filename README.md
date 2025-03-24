@@ -36,7 +36,7 @@ pip install aiofiles --user
 
 ### Installation Method 1: Direct Installation
 ```bash
-git clone https://github.com/yourusername/pixelvault.git
+git clone https://github.com/BloodstainedOath/PixelVault.git
 cd pixelvault
 pip install -e .
 pixelvault
@@ -44,7 +44,7 @@ pixelvault
 
 ### Installation Method 2: Run Without Installing
 ```bash
-git clone https://github.com/yourusername/pixelvault.git
+git clone https://github.com/BloodstainedOath/PixelVault.git
 cd pixelvault
 python src/main.py
 ```
