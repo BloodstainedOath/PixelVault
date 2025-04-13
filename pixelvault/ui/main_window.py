@@ -9,6 +9,7 @@ import tempfile
 import subprocess
 from typing import List, Dict, Any, Optional
 from pathlib import Path
+from PIL import Image, PngImagePlugin
 
 from ..api import SourceManager, ImageSource
 from ..api.wallhaven import Category as WallhavenCategory, Purity as WallhavenPurity, Sorting as WallhavenSorting
@@ -35,6 +36,9 @@ class MainWindow(Gtk.Window):
         self.has_next_page = False
         self.is_loading = False
         
+        # Search query
+        self.search_query = ""
+        
         # Additional filters for Wallhaven
         self.wallhaven_category = WallhavenCategory.ALL
         self.wallhaven_purity = WallhavenPurity.SFW  # Default to SFW only
@@ -44,8 +48,21 @@ class MainWindow(Gtk.Window):
         self._create_header_bar()
         self._create_layout()
         
+        # Set initial UI state
+        self._initialize_ui_state()
+        
         # Load initial images
         self._load_images(reset=True)
+    
+    def _initialize_ui_state(self):
+        """Initialize UI state based on current settings."""
+        # Set search bar visibility based on current source
+        if self.source_manager.current_source == ImageSource.WALLHAVEN:
+            self.wallhaven_search_box.show_all()
+            self.sort_combo.set_sensitive(True)
+        else:
+            self.wallhaven_search_box.hide()
+            self.sort_combo.set_sensitive(False)
     
     def _create_header_bar(self):
         """Create the header bar."""
@@ -67,6 +84,24 @@ class MainWindow(Gtk.Window):
         sources_box.pack_start(Gtk.Label.new("Source:"), False, False, 0)
         sources_box.pack_start(self.source_combo, False, False, 0)
         
+        # Wallhaven search bar
+        self.wallhaven_search_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        
+        self.wallhaven_search_entry = Gtk.SearchEntry()
+        self.wallhaven_search_entry.set_placeholder_text("Search Wallhaven...")
+        self.wallhaven_search_entry.set_width_chars(20)
+        self.wallhaven_search_entry.connect("activate", self._on_wallhaven_search_activated)
+        
+        search_button = Gtk.Button.new_with_label("Search")
+        search_button.connect("clicked", self._on_wallhaven_search_clicked)
+        
+        clear_button = Gtk.Button.new_with_label("Clear")
+        clear_button.connect("clicked", self._on_wallhaven_clear_clicked)
+        
+        self.wallhaven_search_box.pack_start(self.wallhaven_search_entry, True, True, 0)
+        self.wallhaven_search_box.pack_start(search_button, False, False, 0)
+        self.wallhaven_search_box.pack_start(clear_button, False, False, 0)
+        
         # Sort dropdown menu (for Wallhaven)
         sort_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         
@@ -76,6 +111,7 @@ class MainWindow(Gtk.Window):
         self.sort_combo.append_text("Random")
         self.sort_combo.set_active(0)  # Default to Latest
         self.sort_combo.connect("changed", self._on_sort_changed)
+        self.sort_combo.set_sensitive(False)
         
         sort_box.pack_start(Gtk.Label.new("Sort:"), False, False, 0)
         sort_box.pack_start(self.sort_combo, False, False, 0)
@@ -104,6 +140,7 @@ class MainWindow(Gtk.Window):
         refresh_button.connect("clicked", self._on_refresh_clicked)
         
         header_bar.pack_start(sources_box)
+        header_bar.pack_start(self.wallhaven_search_box)
         header_bar.pack_start(sort_box)
         header_bar.pack_start(advanced_button)
         header_bar.pack_start(tag_button)
@@ -156,7 +193,7 @@ class MainWindow(Gtk.Window):
         # FlowBox for displaying images with modern styling
         self.flowbox = Gtk.FlowBox()
         self.flowbox.set_valign(Gtk.Align.START)
-        self.flowbox.set_max_children_per_line(4)  # Better for widescreen displays
+        self.flowbox.set_max_children_per_line(3)  # Reduced from 4 to 3 for larger images
         self.flowbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.flowbox.set_homogeneous(True)
         self.flowbox.set_column_spacing(16)        # More generous spacing
@@ -245,29 +282,46 @@ class MainWindow(Gtk.Window):
         thread.start()
     
     def _on_source_changed(self, combo):
-        """Handle source change.
+        """Handle source change event.
         
         Args:
             combo: The ComboBox widget
         """
-        active = combo.get_active()
-        if active == 0:
+        # Get the selected source
+        source_text = combo.get_active_text()
+        
+        # Map to enum
+        if source_text == "Wallhaven":
             self.source_manager.set_source(ImageSource.WALLHAVEN)
+            self.wallhaven_search_box.show_all()  # Show search bar for Wallhaven
             # Show sort options for Wallhaven
             self.sort_combo.set_sensitive(True)
-        elif active == 1:
+        elif source_text == "Waifu.im":
             self.source_manager.set_source(ImageSource.WAIFUIM)
+            self.wallhaven_search_box.hide()  # Hide search bar for other sources
             # Hide sort options for Waifu.im
             self.sort_combo.set_sensitive(False)
-        elif active == 2:
+        elif source_text == "Waifu.pics":
             self.source_manager.set_source(ImageSource.WAIFUPICS)
+            self.wallhaven_search_box.hide()  # Hide search bar for other sources
             # Hide sort options for Waifu.pics
             self.sort_combo.set_sensitive(False)
         
         # Clear selected tags when changing source
         self.selected_tags = []
         
-        # Reset and load images
+        # Clear search query when changing source
+        self.search_query = ""
+        self.wallhaven_search_entry.set_text("")
+        
+        # Reset pagination
+        self.current_page = 1
+        
+        # Clear the current flowbox
+        for child in self.flowbox.get_children():
+            self.flowbox.remove(child)
+        
+        # Load images for the new source
         self._load_images(reset=True)
     
     def _on_advanced_button_clicked(self, button):
@@ -709,6 +763,11 @@ class MainWindow(Gtk.Window):
                     kwargs["method"] = "random"
                 else:
                     kwargs["method"] = "latest"
+                
+                # Add search query if provided
+                if self.search_query.strip():
+                    print(f"Searching Wallhaven for: {self.search_query}")
+                    kwargs["query"] = self.search_query
             
             # Get images from the current source with pagination
             response = self.source_manager.get_images(
@@ -818,16 +877,19 @@ class MainWindow(Gtk.Window):
         """
         # Create a wrapper for the thumbnail that includes padding
         thumbnail_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        thumbnail_container.set_margin_top(8)
-        thumbnail_container.set_margin_bottom(8)
-        thumbnail_container.set_margin_start(8)
-        thumbnail_container.set_margin_end(8)
+        thumbnail_container.set_margin_top(10)
+        thumbnail_container.set_margin_bottom(10)
+        thumbnail_container.set_margin_start(10)
+        thumbnail_container.set_margin_end(10)
+        
+        # Set a fixed minimum size for consistency
+        thumbnail_container.set_property("width-request", 200)
+        thumbnail_container.set_property("height-request", 180)
         
         # Load image in background thread
         thread = threading.Thread(target=self._load_image_thumbnail, args=(image, thumbnail_container))
         thread.daemon = True
         thread.start()
-        
         
         self.flowbox.add(thumbnail_container)
     
@@ -848,7 +910,9 @@ class MainWindow(Gtk.Window):
             if not image.get("preview"):
                 raise ValueError("No preview URL available")
                 
-            response = requests.get(image["preview"])
+            # Use proper headers to ensure images load correctly
+            headers = {'User-Agent': 'PixelVault Image Downloader'}
+            response = requests.get(image["preview"], headers=headers)
             if response.status_code != 200:
                 raise ValueError(f"Failed to load image: HTTP {response.status_code}")
                 
@@ -869,10 +933,30 @@ class MainWindow(Gtk.Window):
                         
                         pixbuf = loader.get_pixbuf()
                         
+                        # Get actual dimensions from pixbuf
+                        actual_width = pixbuf.get_width()
+                        actual_height = pixbuf.get_height()
+                        
+                        # Update image data with actual dimensions if not present
+                        if not image_data.get('width'):
+                            image_data['width'] = actual_width
+                        if not image_data.get('height'):
+                            image_data['height'] = actual_height
+                        
                         # Scale the pixbuf
-                        width = 180
-                        height = int(pixbuf.get_height() * (width / pixbuf.get_width()))
-                        scaled_pixbuf = pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
+                        max_width = 550
+                        max_height = 400
+                        width = pixbuf.get_width()
+                        height = pixbuf.get_height()
+                        
+                        if width > height:
+                            new_width = max_width
+                            new_height = int(height * (max_width / width))
+                        else:
+                            new_height = max_height
+                            new_width = int(width * (max_height / height))
+                        
+                        scaled_pixbuf = pixbuf.scale_simple(new_width, new_height, GdkPixbuf.InterpType.BILINEAR)
                         
                         # Create image widget
                         image_widget = Gtk.Image.new_from_pixbuf(scaled_pixbuf)
@@ -880,11 +964,25 @@ class MainWindow(Gtk.Window):
                         # Store the image data
                         setattr(image_widget, 'image_data', image_data)
                         
-                        # Add the image and label
+                        # Add the image
                         box.pack_start(image_widget, False, False, 0)
+                        
+                        # Create a box for metadata
+                        meta_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+                        
+                        # Add provider
                         provider_label = Gtk.Label.new(image_data["provider"])
                         provider_label.set_ellipsize(3)  # PANGO_ELLIPSIZE_END
-                        box.pack_start(provider_label, False, False, 0)
+                        meta_box.pack_start(provider_label, False, False, 0)
+                        
+                        # Add resolution if available
+                        if image_data.get('width') and image_data.get('height'):
+                            res_label = Gtk.Label.new(f"{image_data['width']}x{image_data['height']}")
+                            res_label.set_ellipsize(3)
+                            meta_box.pack_start(res_label, False, False, 0)
+                        
+                        # Add metadata box
+                        box.pack_start(meta_box, False, False, 0)
                         box.show_all()
                     except Exception as e:
                         print(f"Error processing image data: {e}")
@@ -938,6 +1036,14 @@ class MainWindow(Gtk.Window):
             
             if not image_data:
                 raise ValueError("Could not find image data")
+            
+            # Make sure required fields are present
+            if not image_data.get('provider'):
+                image_data['provider'] = "Unknown"
+            
+            # Ensure we have width/height (these might come from the preview)
+            if not image_data.get('width') or not image_data.get('height'):
+                print("Image dimensions not available, will be filled when loading preview")
             
             # Check if auto-download is enabled
             if settings.get("auto_download", False):
@@ -1078,75 +1184,172 @@ class MainWindow(Gtk.Window):
             image_data: Image data dictionary
             auto_download_enabled: Whether auto-download is enabled
         """
-        # Determine the buttons to show based on auto-download status
-        if auto_download_enabled:
-            # If auto-download is enabled, show Download, Open Folder and Wallpaper buttons
-            buttons = (
-                "Cancel", Gtk.ResponseType.CANCEL,
-                "Open Folder", Gtk.ResponseType.HELP,
-                "Download Again", Gtk.ResponseType.APPLY,
-                "Set as Wallpaper", Gtk.ResponseType.OK
-            )
-        else:
-            # Standard buttons when auto-download is disabled
-            buttons = (
-                "Cancel", Gtk.ResponseType.CANCEL,
-                "Download", Gtk.ResponseType.APPLY,
-                "Set as Wallpaper", Gtk.ResponseType.OK
-            )
+        try:
+            # Normalize tags - ensure they're strings
+            if 'tags' in image_data:
+                if isinstance(image_data['tags'], list):
+                    # Check if tags are dictionaries or strings
+                    normalized_tags = []
+                    for tag in image_data['tags']:
+                        if isinstance(tag, dict) and 'name' in tag:
+                            normalized_tags.append(tag['name'])
+                        elif isinstance(tag, str):
+                            normalized_tags.append(tag)
+                    image_data['tags'] = normalized_tags
+                elif not image_data['tags']:
+                    # If empty, use empty list
+                    image_data['tags'] = []
             
-        dialog = Gtk.Dialog(
-            title="Image Details",
-            parent=self,
-            flags=0,
-            buttons=buttons
-        )
-        dialog.set_default_size(500, 400)
-        
-        content_area = dialog.get_content_area()
-        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        content_box.set_margin_top(12)
-        content_box.set_margin_bottom(12)
-        content_box.set_margin_start(12)
-        content_box.set_margin_end(12)
-        content_area.add(content_box)
-        
-        # Image preview
-        thread = threading.Thread(target=self._load_preview_image, args=(image_data, content_box))
-        thread.daemon = True
-        thread.start()
-        
-        # Image details
-        details_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        details_box.pack_start(Gtk.Label.new(f"Provider: {image_data['provider']}"), False, False, 0)
-        
-        if image_data['width'] and image_data['height']:
-            details_box.pack_start(Gtk.Label.new(f"Resolution: {image_data['width']}x{image_data['height']}"), False, False, 0)
-        
-        if image_data['source']:
-            source_label = Gtk.LinkButton.new_with_label(image_data['source'], "Source")
-            details_box.pack_start(source_label, False, False, 0)
-        
-        # Add auto-download status indicator if enabled
-        if auto_download_enabled:
-            download_dir = settings.get("download_directory", "")
-            auto_dl_label = Gtk.Label()
-            auto_dl_label.set_markup(f"<i>Auto-downloading to {os.path.basename(download_dir)}/</i>")
-            details_box.pack_start(auto_dl_label, False, False, 0)
-        
-        content_box.pack_start(details_box, False, False, 0)
-        
-        dialog.show_all()
-        response = dialog.run()
-        
-        if response == Gtk.ResponseType.OK:
-            self._set_as_wallpaper(image_data)
-        elif response == Gtk.ResponseType.APPLY:
-            self._download_image(image_data)
-        elif response == Gtk.ResponseType.HELP:  # Open folder button
-            self._open_download_folder()
-        
-        dialog.destroy()
+            # Determine the buttons to show based on auto-download status
+            if auto_download_enabled:
+                # If auto-download is enabled, show Download, Open Folder and Wallpaper buttons
+                buttons = (
+                    "Cancel", Gtk.ResponseType.CANCEL,
+                    "Open Folder", Gtk.ResponseType.HELP,
+                    "Download Again", Gtk.ResponseType.APPLY,
+                    "Set as Wallpaper", Gtk.ResponseType.OK
+                )
+            else:
+                # Standard buttons when auto-download is disabled
+                buttons = (
+                    "Cancel", Gtk.ResponseType.CANCEL,
+                    "Download", Gtk.ResponseType.APPLY,
+                    "Set as Wallpaper", Gtk.ResponseType.OK
+                )
+                
+            dialog = Gtk.Dialog(
+                title="Image Details",
+                parent=self,
+                flags=0,
+                buttons=buttons
+            )
+            dialog.set_default_size(600, 500)
+            
+            content_area = dialog.get_content_area()
+            content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            content_box.set_margin_top(12)
+            content_box.set_margin_bottom(12)
+            content_box.set_margin_start(12)
+            content_box.set_margin_end(12)
+            content_area.add(content_box)
+            
+            # Image preview
+            thread = threading.Thread(target=self._load_preview_image, args=(image_data, content_box))
+            thread.daemon = True
+            thread.start()
+            
+            # Image details
+            details_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            
+            # Create a scrolled window for metadata
+            scrolled_window = Gtk.ScrolledWindow()
+            scrolled_window.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            scrolled_window.set_min_content_height(150)
+            
+            # Use a grid for metadata with better alignment
+            metadata_grid = Gtk.Grid()
+            metadata_grid.set_column_spacing(10)
+            metadata_grid.set_row_spacing(6)
+            
+            # Add all available metadata
+            row = 0
+            
+            # ID
+            if image_data.get('id'):
+                id_label = Gtk.Label.new("ID:")
+                id_label.set_halign(Gtk.Align.START)
+                id_value = Gtk.Label.new(str(image_data.get('id')))
+                id_value.set_halign(Gtk.Align.START)
+                id_value.set_selectable(True)
+                metadata_grid.attach(id_label, 0, row, 1, 1)
+                metadata_grid.attach(id_value, 1, row, 1, 1)
+                row += 1
+            
+            # Provider
+            provider_label = Gtk.Label.new("Provider:")
+            provider_label.set_halign(Gtk.Align.START)
+            provider_value = Gtk.Label.new(image_data.get('provider', 'Unknown'))
+            provider_value.set_halign(Gtk.Align.START)
+            provider_value.set_selectable(True)
+            metadata_grid.attach(provider_label, 0, row, 1, 1)
+            metadata_grid.attach(provider_value, 1, row, 1, 1)
+            row += 1
+            
+            # Resolution
+            if image_data.get('width') and image_data.get('height'):
+                res_label = Gtk.Label.new("Resolution:")
+                res_label.set_halign(Gtk.Align.START)
+                res_value = Gtk.Label.new(f"{image_data.get('width')}x{image_data.get('height')}")
+                res_value.set_halign(Gtk.Align.START)
+                res_value.set_selectable(True)
+                metadata_grid.attach(res_label, 0, row, 1, 1)
+                metadata_grid.attach(res_value, 1, row, 1, 1)
+                row += 1
+            
+            # Source
+            if image_data.get('source'):
+                source_label = Gtk.Label.new("Source:")
+                source_label.set_halign(Gtk.Align.START)
+                source_link = Gtk.LinkButton.new_with_label(image_data.get('source'), image_data.get('source'))
+                source_link.set_halign(Gtk.Align.START)
+                metadata_grid.attach(source_label, 0, row, 1, 1)
+                metadata_grid.attach(source_link, 1, row, 1, 1)
+                row += 1
+            
+            # Tags
+            if image_data.get('tags') and len(image_data.get('tags', [])) > 0:
+                tags_label = Gtk.Label.new("Tags:")
+                tags_label.set_halign(Gtk.Align.START)
+                
+                # Join tags list into a string
+                tags_text = ", ".join(image_data.get('tags', []))
+                
+                tags_value = Gtk.Label.new(tags_text)
+                tags_value.set_halign(Gtk.Align.START)
+                tags_value.set_line_wrap(True)
+                tags_value.set_selectable(True)
+                metadata_grid.attach(tags_label, 0, row, 1, 1)
+                metadata_grid.attach(tags_value, 1, row, 1, 1)
+                row += 1
+            
+            # Category
+            if image_data.get('category'):
+                cat_label = Gtk.Label.new("Category:")
+                cat_label.set_halign(Gtk.Align.START)
+                cat_value = Gtk.Label.new(image_data.get('category'))
+                cat_value.set_halign(Gtk.Align.START)
+                cat_value.set_selectable(True)
+                metadata_grid.attach(cat_label, 0, row, 1, 1)
+                metadata_grid.attach(cat_value, 1, row, 1, 1)
+                row += 1
+            
+            # Add grid to scrolled window
+            scrolled_window.add(metadata_grid)
+            details_box.pack_start(scrolled_window, True, True, 0)
+            
+            # Add auto-download status indicator if enabled
+            if auto_download_enabled:
+                download_dir = settings.get("download_directory", "")
+                auto_dl_label = Gtk.Label()
+                auto_dl_label.set_markup(f"<i>Auto-downloading to {os.path.basename(download_dir)}/</i>")
+                details_box.pack_start(auto_dl_label, False, False, 0)
+            
+            content_box.pack_start(details_box, True, True, 0)
+            
+            dialog.show_all()
+            response = dialog.run()
+            
+            if response == Gtk.ResponseType.OK:
+                self._set_as_wallpaper(image_data)
+            elif response == Gtk.ResponseType.APPLY:
+                self._download_image(image_data)
+            elif response == Gtk.ResponseType.HELP:  # Open folder button
+                self._open_download_folder()
+            
+            dialog.destroy()
+        except Exception as e:
+            print(f"Error in _show_image_dialog: {e}")
+            self.status_label.set_text(f"Error showing image details: {str(e)}")
     
     def _open_download_folder(self):
         """Open the download folder in the file manager."""
@@ -1267,15 +1470,73 @@ class MainWindow(Gtk.Window):
             if not is_auto_download:
                 GLib.idle_add(lambda: self.status_label.set_text(f"Downloading image..."))
             
-            # Download the full-size image
-            response = requests.get(image_data["url"], stream=True)
+            # Download the full-size image with stream=True to avoid loading entire image in memory
+            headers = {'User-Agent': 'PixelVault Image Downloader'}
+            response = requests.get(image_data["url"], stream=True, headers=headers)
             response.raise_for_status()
             
-            # Save to file
+            # Print debug info about the image being downloaded
+            print(f"Downloading image: {image_data.get('id', 'unknown')} from {image_data.get('provider', 'unknown')}")
+            print(f"URL: {image_data.get('url', 'unknown')}")
+            print(f"Resolution: {image_data.get('width', 'unknown')}x{image_data.get('height', 'unknown')}")
+            
+            # Save to file preserving original quality
             with open(save_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
+            
+            # Try to add metadata to image
+            try:
+                # Open image with PIL to update metadata
+                img = Image.open(save_path)
+                
+                # Extract actual image dimensions from the file
+                width, height = img.size
+                
+                # Update image_data with actual dimensions if they weren't set
+                if not image_data.get('width') or not image_data.get('height'):
+                    image_data['width'] = width
+                    image_data['height'] = height
+                    print(f"Updated dimensions from file: {width}x{height}")
+                
+                # Create metadata dictionary for PNG files
+                metadata = PngImagePlugin.PngInfo() if save_path.lower().endswith('.png') else None
+                
+                # If PNG, we can add metadata
+                if metadata:
+                    # Normalize tags
+                    tag_list = []
+                    if 'tags' in image_data:
+                        if isinstance(image_data['tags'], list):
+                            for tag in image_data['tags']:
+                                if isinstance(tag, dict) and 'name' in tag:
+                                    tag_list.append(tag['name'])
+                                elif isinstance(tag, str):
+                                    tag_list.append(tag)
+                        image_data['tags'] = tag_list
+                    
+                    # Add image information as metadata
+                    if image_data.get('id'):
+                        metadata.add_text("ID", str(image_data.get('id')))
+                    if image_data.get('provider'):
+                        metadata.add_text("Provider", str(image_data.get('provider')))
+                    if image_data.get('source'):
+                        metadata.add_text("Source", str(image_data.get('source')))
+                    if image_data.get('width') and image_data.get('height'):
+                        metadata.add_text("Resolution", f"{image_data.get('width')}x{image_data.get('height')}")
+                    if tag_list:
+                        metadata.add_text("Tags", ", ".join(tag_list))
+                    
+                    # Save the PNG with metadata
+                    img.save(save_path, pnginfo=metadata)
+                    print(f"Added metadata to PNG file")
+                
+                # Close the image
+                img.close()
+            except Exception as e:
+                print(f"Error adding metadata to image: {e}")
+                # Continue even if metadata addition fails
             
             # Show success message
             filename = os.path.basename(save_path)
@@ -1292,8 +1553,14 @@ class MainWindow(Gtk.Window):
                     text="Download Complete"
                 )
                 
-                # Add secondary text showing the path
-                notification_dialog.format_secondary_text(f"Image saved to: {save_path}")
+                # Add secondary text showing the path and metadata
+                if image_data.get('width') and image_data.get('height'):
+                    notification_dialog.format_secondary_text(
+                        f"Image saved to: {save_path}\n"
+                        f"Resolution: {image_data.get('width')}x{image_data.get('height')}"
+                    )
+                else:
+                    notification_dialog.format_secondary_text(f"Image saved to: {save_path}")
                 
                 # Add button to open folder
                 notification_dialog.add_button("Open Folder", Gtk.ResponseType.HELP)
@@ -1346,8 +1613,12 @@ class MainWindow(Gtk.Window):
         GLib.idle_add(lambda: box.pack_start(placeholder_label, False, False, 0) or box.reorder_child(placeholder_label, 0) or box.show_all())
         
         try:
-            # Load the image in the background
-            response = requests.get(image_data["url"])
+            # Load the image in the background with headers
+            headers = {'User-Agent': 'PixelVault Image Downloader'}
+            response = requests.get(image_data["url"], headers=headers, stream=True)
+            response.raise_for_status()
+            
+            # Read the data
             data_bytes = response.content
             
             # Update the image in the main thread
@@ -1366,18 +1637,28 @@ class MainWindow(Gtk.Window):
                         
                         pixbuf = loader.get_pixbuf()
                         
+                        # Get actual dimensions from pixbuf
+                        actual_width = pixbuf.get_width()
+                        actual_height = pixbuf.get_height()
+                        
+                        # Update image data with actual dimensions if not present
+                        if not image_data.get('width'):
+                            image_data['width'] = actual_width
+                        if not image_data.get('height'):
+                            image_data['height'] = actual_height
+                        
                         # Scale the pixbuf
-                        max_width = 450
-                        max_height = 300
+                        max_width = 550
+                        max_height = 400
                         width = pixbuf.get_width()
                         height = pixbuf.get_height()
                         
                         if width > height:
-                            new_width = max_width
-                            new_height = int(height * (max_width / width))
+                            new_width = min(width, max_width)
+                            new_height = int(height * (new_width / width))
                         else:
-                            new_height = max_height
-                            new_width = int(width * (max_height / height))
+                            new_height = min(height, max_height)
+                            new_width = int(width * (new_height / height))
                         
                         scaled_pixbuf = pixbuf.scale_simple(new_width, new_height, GdkPixbuf.InterpType.BILINEAR)
                         
@@ -1428,13 +1709,72 @@ class MainWindow(Gtk.Window):
             image_data: Image data dictionary
         """
         try:
-            # Download the image
-            response = requests.get(image_data["url"])
+            # Download the image with stream=True to preserve quality
+            headers = {'User-Agent': 'PixelVault Image Downloader'}
+            response = requests.get(image_data["url"], stream=True, headers=headers)
+            response.raise_for_status()
             
-            # Save to a temporary file
-            temp_fd, temp_path = tempfile.mkstemp(suffix=".jpg")
+            # Determine appropriate file extension
+            url = image_data["url"].lower()
+            ext = ".jpg"  # Default extension
+            if url.endswith(".png"):
+                ext = ".png"
+            elif url.endswith(".jpeg"):
+                ext = ".jpg"
+            
+            # Save to a temporary file with correct extension
+            temp_fd, temp_path = tempfile.mkstemp(suffix=ext)
             with os.fdopen(temp_fd, 'wb') as f:
-                f.write(response.content)
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            # Try to add metadata to wallpaper image
+            try:
+                # Get dimensions from the file
+                img = Image.open(temp_path)
+                width, height = img.size
+                
+                # Update image_data with actual dimensions if they weren't set
+                if not image_data.get('width') or not image_data.get('height'):
+                    image_data['width'] = width
+                    image_data['height'] = height
+                
+                # Create metadata for PNG files
+                if temp_path.lower().endswith('.png'):
+                    metadata = PngImagePlugin.PngInfo()
+                    
+                    # Normalize tags
+                    tag_list = []
+                    if 'tags' in image_data:
+                        if isinstance(image_data['tags'], list):
+                            for tag in image_data['tags']:
+                                if isinstance(tag, dict) and 'name' in tag:
+                                    tag_list.append(tag['name'])
+                                elif isinstance(tag, str):
+                                    tag_list.append(tag)
+                        image_data['tags'] = tag_list
+                    
+                    # Add image information as metadata
+                    if image_data.get('id'):
+                        metadata.add_text("ID", str(image_data.get('id')))
+                    if image_data.get('provider'):
+                        metadata.add_text("Provider", str(image_data.get('provider')))
+                    if image_data.get('source'):
+                        metadata.add_text("Source", str(image_data.get('source')))
+                    if image_data.get('width') and image_data.get('height'):
+                        metadata.add_text("Resolution", f"{image_data.get('width')}x{image_data.get('height')}")
+                    if tag_list:
+                        metadata.add_text("Tags", ", ".join(tag_list))
+                    
+                    # Save the PNG with metadata
+                    img.save(temp_path, pnginfo=metadata)
+                
+                # Close the image
+                img.close()
+            except Exception as e:
+                print(f"Error adding metadata to wallpaper image: {e}")
+                # Continue even if metadata addition fails
             
             # Set as wallpaper using gsettings (GNOME)
             try:
@@ -1442,6 +1782,7 @@ class MainWindow(Gtk.Window):
                     "gsettings", "set", "org.gnome.desktop.background",
                     "picture-uri", f"file://{temp_path}"
                 ])
+                self.status_label.set_text(f"Wallpaper set successfully")
                 return
             except:
                 pass
@@ -1452,6 +1793,7 @@ class MainWindow(Gtk.Window):
                     "xfconf-query", "-c", "xfce4-desktop", "-p",
                     "/backdrop/screen0/monitor0/workspace0/last-image", "-s", temp_path
                 ])
+                self.status_label.set_text(f"Wallpaper set successfully")
                 return
             except:
                 pass
@@ -1459,6 +1801,7 @@ class MainWindow(Gtk.Window):
             # Try feh (for minimal window managers)
             try:
                 subprocess.call(["feh", "--bg-fill", temp_path])
+                self.status_label.set_text(f"Wallpaper set successfully")
                 return
             except:
                 pass
@@ -1466,33 +1809,17 @@ class MainWindow(Gtk.Window):
             # Try nitrogen
             try:
                 subprocess.call(["nitrogen", "--set-zoom-fill", temp_path])
+                self.status_label.set_text(f"Wallpaper set successfully")
                 return
             except:
                 pass
-            
-            # If we get here, none of the commands worked
-            dialog = Gtk.MessageDialog(
-                transient_for=self,
-                flags=0,
-                message_type=Gtk.MessageType.ERROR,
-                buttons=Gtk.ButtonsType.OK,
-                text="Could not set wallpaper"
-            )
-            dialog.format_secondary_text("No compatible wallpaper setting method found.")
-            dialog.run()
-            dialog.destroy()
+                
+            # If we got here, none of the wallpaper setters worked
+            self.status_label.set_text("Failed to set wallpaper - no compatible wallpaper setter found")
             
         except Exception as e:
-            dialog = Gtk.MessageDialog(
-                transient_for=self,
-                flags=0,
-                message_type=Gtk.MessageType.ERROR,
-                buttons=Gtk.ButtonsType.OK,
-                text="Error setting wallpaper"
-            )
-            dialog.format_secondary_text(str(e))
-            dialog.run()
-            dialog.destroy()
+            print(f"Error setting wallpaper: {e}")
+            self.status_label.set_text(f"Error setting wallpaper: {str(e)}")
 
     def _on_sort_changed(self, combo):
         """Handle sort method change.
@@ -1616,3 +1943,31 @@ class MainWindow(Gtk.Window):
             dialog.format_secondary_text("Please select at least one of: SFW, Sketchy, or NSFW")
             dialog.run()
             dialog.destroy()
+
+    def _on_wallhaven_search_activated(self, entry):
+        """Handle search entry activation.
+        
+        Args:
+            entry: The SearchEntry widget
+        """
+        self.search_query = entry.get_text()
+        self._load_images(reset=True)
+
+    def _on_wallhaven_search_clicked(self, button):
+        """Handle search button click.
+        
+        Args:
+            button: The Button widget
+        """
+        self.search_query = self.wallhaven_search_entry.get_text()
+        self._load_images(reset=True)
+
+    def _on_wallhaven_clear_clicked(self, button):
+        """Handle clear search button click.
+        
+        Args:
+            button: The Button widget
+        """
+        self.wallhaven_search_entry.set_text("")
+        self.search_query = ""
+        self._load_images(reset=True)

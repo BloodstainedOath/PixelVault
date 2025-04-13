@@ -139,6 +139,10 @@ class SourceManager:
             if tags and len(tags) > 0:
                 wallhaven_params['tags'] = tags
             
+            # Handle search query
+            if 'query' in kwargs and kwargs['query']:
+                wallhaven_params['query'] = kwargs['query']
+            
             # Reset seed if requested (for new searches)
             if reset_seed:
                 self.wallhaven_random_seed = None

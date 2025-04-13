@@ -47,7 +47,21 @@ class TopRange(Enum):
     ONE_YEAR = "1y"
 
 class WallhavenAPI:
-    """Client for the Wallhaven API."""
+    """Client for the Wallhaven API.
+    
+    This client implements the Wallhaven API v1, supporting all major endpoints:
+    - Search for wallpapers with filtering options
+    - Get details of specific wallpapers
+    - Browse user collections
+    - Access user settings
+    
+    Authentication can be provided using an API key, which is added as both:
+    - An X-API-Key header (recommended method per API docs)
+    - A URL parameter "apikey" (fallback for specific endpoints)
+    
+    The API key can be obtained from the user's account settings page on Wallhaven.
+    Without an API key, access is limited to SFW content only.
+    """
     
     BASE_URL = "https://wallhaven.cc/api/v1"
     
@@ -59,10 +73,16 @@ class WallhavenAPI:
         """
         self.api_key = api_key
         self.session = requests.Session()
+        # Set user agent to avoid 403 errors
+        self.session.headers.update({
+            "User-Agent": "PixelVault/1.0 (https://github.com/pixelvault)"
+        })
         
         if api_key:
             print(f"Initializing Wallhaven API with API key: {api_key[:4]}...{api_key[-4:] if len(api_key) > 8 else ''}")
-            # Set the API key as a parameter for all requests
+            # Set the API key as a header for all requests
+            self.session.headers.update({"X-API-Key": api_key})
+            # Also keep the URL param method as fallback for specific endpoints
             self.session.params = {"apikey": api_key}
         else:
             print("Initializing Wallhaven API without an API key (NSFW content will be limited)")
@@ -177,13 +197,20 @@ class WallhavenAPI:
             if e.response.status_code == 401:
                 print("Authentication error: Invalid API key")
                 # Return empty result set
-                return {"data": [], "meta": {"current_page": page, "last_page": page}}
+                return {"data": [], "meta": {"current_page": page, "last_page": page}, "error": "Invalid API key"}
             elif e.response.status_code == 429:
                 print("Rate limit exceeded. Please try again later.")
                 # Return empty result set
-                return {"data": [], "meta": {"current_page": page, "last_page": page}}
+                return {"data": [], "meta": {"current_page": page, "last_page": page}, "error": "Rate limit exceeded"}
+            elif e.response.status_code == 400:
+                print(f"Bad request: Invalid parameters - {e}")
+                return {"data": [], "meta": {"current_page": page, "last_page": page}, "error": "Invalid parameters"}
             else:
-                raise
+                print(f"HTTP error {e.response.status_code}: {e}")
+                return {"data": [], "meta": {"current_page": page, "last_page": page}, "error": f"HTTP error {e.response.status_code}"}
+        except Exception as e:
+            print(f"Error during search: {str(e)}")
+            return {"data": [], "meta": {"current_page": page, "last_page": page}, "error": str(e)}
     
     def get_wallpaper(self, wallpaper_id: str) -> Dict[str, Any]:
         """Get details for a specific wallpaper.
@@ -194,9 +221,20 @@ class WallhavenAPI:
         Returns:
             JSON response containing wallpaper details
         """
-        response = self.session.get(f"{self.BASE_URL}/w/{wallpaper_id}")
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = self.session.get(f"{self.BASE_URL}/w/{wallpaper_id}")
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 401:
+                if not self.api_key:
+                    print("Authentication error: API key required for this wallpaper (likely NSFW content)")
+                    return {"data": None, "error": "API key required for NSFW content"}
+                else:
+                    print("Authentication error: Invalid API key or insufficient permissions")
+                    return {"data": None, "error": "Invalid API key or insufficient permissions"}
+            else:
+                raise
     
     def get_tag(self, tag_id: int) -> Dict[str, Any]:
         """Get information about a specific tag.
@@ -222,9 +260,16 @@ class WallhavenAPI:
         if not self.api_key:
             raise ValueError("API key is required for this operation")
             
-        response = self.session.get(f"{self.BASE_URL}/settings")
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = self.session.get(f"{self.BASE_URL}/settings")
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 401:
+                print("Authentication error: Invalid API key")
+                return {"data": None, "error": "Invalid API key"}
+            else:
+                raise
     
     def get_collections(self, username: Optional[str] = None) -> Dict[str, Any]:
         """Get collections for a user.
@@ -244,10 +289,20 @@ class WallhavenAPI:
             if not self.api_key:
                 raise ValueError("API key is required when username is not provided")
             url = f"{self.BASE_URL}/collections"
-            
-        response = self.session.get(url)
-        response.raise_for_status()
-        return response.json()
+        
+        try:    
+            response = self.session.get(url)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 401:
+                print("Authentication error: Invalid API key")
+                return {"data": [], "error": "Invalid API key"}
+            elif e.response.status_code == 404:
+                print(f"User not found: {username}")
+                return {"data": [], "error": f"User not found: {username}"}
+            else:
+                raise
     
     def get_collection_wallpapers(self, username: str, collection_id: int, page: int = 1) -> Dict[str, Any]:
         """Get wallpapers from a specific collection.
@@ -261,9 +316,19 @@ class WallhavenAPI:
             JSON response containing wallpapers in the collection
         """
         params = {"page": page}
-        response = self.session.get(f"{self.BASE_URL}/collections/{username}/{collection_id}", params=params)
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = self.session.get(f"{self.BASE_URL}/collections/{username}/{collection_id}", params=params)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 401:
+                print("Authentication error: This collection may be private and requires a valid API key")
+                return {"data": [], "meta": {"current_page": page, "last_page": page}, "error": "Authentication required"}
+            elif e.response.status_code == 404:
+                print(f"Collection not found: User={username}, Collection ID={collection_id}")
+                return {"data": [], "meta": {"current_page": page, "last_page": page}, "error": "Collection not found"}
+            else:
+                raise
     
     def get_latest(self, page: int = 1, **kwargs) -> Dict[str, Any]:
         """Get latest wallpapers.
@@ -302,3 +367,44 @@ class WallhavenAPI:
             JSON response containing random wallpapers
         """
         return self.search(sorting=Sorting.RANDOM, page=page, seed=seed, **kwargs)
+        
+    def verify_api_key(self) -> bool:
+        """Verify that the current API key is valid.
+        
+        Returns:
+            True if API key is valid, False otherwise
+        """
+        if not self.api_key:
+            print("No API key provided to verify")
+            return False
+            
+        try:
+            # Try to get user settings which requires authentication
+            response = self.session.get(f"{self.BASE_URL}/settings")
+            response.raise_for_status()
+            print("API key verification successful")
+            return True
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 401:
+                print("API key verification failed: Invalid API key")
+                return False
+            else:
+                print(f"API key verification failed: HTTP error {e.response.status_code}")
+                return False
+        except Exception as e:
+            print(f"API key verification failed: {str(e)}")
+            return False
+            
+    def debug_request(self, url: str, params: Dict[str, Any] = None) -> None:
+        """Debug an API request by showing request and response details."""
+        print(f"\nDEBUG REQUEST: {url}")
+        print(f"Headers: {self.session.headers}")
+        print(f"Params: {params if params else self.session.params}")
+        
+        try:
+            response = self.session.get(url, params=params)
+            print(f"Status Code: {response.status_code}")
+            print(f"Response Headers: {response.headers}")
+            print(f"Response Body: {response.text[:500]}...")  # Show first 500 chars
+        except Exception as e:
+            print(f"Error during debug request: {e}")
