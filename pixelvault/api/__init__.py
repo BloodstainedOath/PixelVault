@@ -24,7 +24,7 @@ class SourceManager:
         # Initialize APIs
         self.wallhaven = WallhavenAPI(api_key=self.wallhaven_api_key if self.wallhaven_api_key else None)
         self.waifuim = WaifuImAPI()
-        self.waifupics = WaifuPicsAPI(use_local=False)
+        self.waifupics = WaifuPicsAPI()
         self.current_source = ImageSource.WALLHAVEN
         
         # Wallhaven random seed for maintaining consistency between pages
@@ -56,6 +56,16 @@ class SourceManager:
             {"id": 22, "name": "sunset", "category": "nature"},
             {"id": 23, "name": "night", "category": "time"},
             {"id": 24, "name": "sky", "category": "nature"}
+        ]
+        
+        # Cache for waifu.pics categories
+        self._waifupics_sfw_categories = [
+            "waifu", "neko", "shinobu", "megumin", "bully", "cuddle", "cry", "hug", "awoo", "kiss", "lick", "pat",
+            "smug", "bonk", "yeet", "blush", "smile", "wave", "highfive", "handhold", "nom", "bite", "glomp", "slap",
+            "kill", "kick", "happy", "wink", "poke", "dance", "cringe"
+        ]
+        self._waifupics_nsfw_categories = [
+            "waifu", "neko", "trap", "blowjob"
         ]
         
     def update_wallhaven_api_key(self, api_key: str):
@@ -254,16 +264,9 @@ class SourceManager:
                 "images": images,
                 "pagination": pagination
             }
-            
+        
         elif self.current_source == ImageSource.WAIFUPICS:
-            # Use the get_random_images method to get more variety
-            response = self.waifupics.get_random_images(
-                count=24, 
-                is_nsfw=kwargs.get('is_nsfw', False),
-                selected_endpoints=tags  # Waifu.pics uses endpoints as tags
-            )
-            
-            # Normalize Waifu.pics response
+            # Get images from Waifu.pics
             images = []
             pagination = {
                 "has_next_page": False,
@@ -271,19 +274,33 @@ class SourceManager:
                 "total_pages": page
             }
             
-            if "files" in response:
-                images = [
-                    {
-                        "id": url.split("/")[-1],  # Extract filename as ID
+            # Get multiple images
+            is_nsfw = kwargs.get('is_nsfw', False)
+            
+            # Use first tag as category if provided, otherwise use 'waifu'
+            category = 'waifu'  # Default category
+            if tags and len(tags) > 0:
+                category = tags[0]
+                print(f"Using category: {category} for waifu.pics (NSFW: {is_nsfw})")
+            
+            # Get multiple images
+            response = self.waifupics.get_many(category=category, is_nsfw=is_nsfw)
+            
+            if "files" in response and response["files"]:
+                for url in response["files"]:
+                    image_data = {
+                        "id": url.split('/')[-1],  # Use filename as ID
                         "url": url,
-                        "preview": url,  # No preview URL provided
-                        "source": "",  # No source provided
+                        "preview": url,  # Use same URL for preview
+                        "source": "",  # Waifu.pics doesn't provide source
                         "width": 0,  # Width not provided
                         "height": 0,  # Height not provided
-                        "provider": "waifu.pics"
+                        "provider": "waifu.pics",
+                        "tags": [category] if category else []
                     }
-                    for url in response["files"]
-                ]
+                    images.append(image_data)
+            else:
+                print(f"No images found for category: {category} (NSFW: {is_nsfw})")
             
             return {
                 "images": images,
@@ -360,42 +377,26 @@ class SourceManager:
                     })
                 
             return result
+        
         elif self.current_source == ImageSource.WAIFUPICS:
-            # Get tags from Waifu.pics (endpoints are tags)
-            all_tags = self.waifupics.get_all_tags()
+            # Return waifu.pics categories as tags
             result = []
             
-            # Add SFW tags
-            for tag in all_tags.get("sfw", []):
-                if isinstance(tag, dict):
-                    result.append({
-                        "name": tag.get("name", ""),
-                        "description": tag.get("description", ""),
-                        "category": "sfw"
-                    })
-                else:
-                    # Handle string tags
-                    result.append({
-                        "name": tag,
-                        "description": f"SFW {tag} images",
-                        "category": "sfw"
-                    })
+            # Add SFW categories
+            for category in self._waifupics_sfw_categories:
+                result.append({
+                    "name": category,
+                    "description": f"SFW {category} images",
+                    "category": "sfw"
+                })
             
-            # Add NSFW tags
-            for tag in all_tags.get("nsfw", []):
-                if isinstance(tag, dict):
-                    result.append({
-                        "name": tag.get("name", ""),
-                        "description": tag.get("description", ""),
-                        "category": "nsfw"
-                    })
-                else:
-                    # Handle string tags
-                    result.append({
-                        "name": tag,
-                        "description": f"NSFW {tag} images",
-                        "category": "nsfw"
-                    })
+            # Add NSFW categories
+            for category in self._waifupics_nsfw_categories:
+                result.append({
+                    "name": category,
+                    "description": f"NSFW {category} images",
+                    "category": "nsfw"
+                })
             
             return result
         
@@ -452,6 +453,6 @@ class SourceManager:
                 "sorting_options": [],
                 "time_ranges": [],
                 "color_filtering": False,
-                "tag_filtering": True
+                "tag_filtering": True  # Categories are implemented as tags
             }
         return {}

@@ -33,16 +33,17 @@ class MainWindow(Gtk.Window):
         
         # Pagination state
         self.current_page = 1
-        self.has_next_page = False
+        self.has_next_page = True
         self.is_loading = False
         
         # Search query
         self.search_query = ""
         
         # Additional filters for Wallhaven
-        self.wallhaven_category = WallhavenCategory.ALL
-        self.wallhaven_purity = WallhavenPurity.SFW  # Default to SFW only
-        self.wallhaven_sorting = WallhavenSorting.DATE_ADDED
+        self.wallhaven_category = WallhavenCategory.from_list(settings.get("wallhaven_categories", ["general", "anime", "people"]))
+        self.wallhaven_purity = WallhavenPurity.from_list(settings.get("wallhaven_purity", ["sfw"]))
+        self.wallhaven_sorting = WallhavenSorting(settings.get("wallhaven_sorting", "date_added"))
+        self.wallhaven_method = "latest"  # Default method for sorting
         
         # Create UI elements
         self._create_header_bar()
@@ -55,7 +56,29 @@ class MainWindow(Gtk.Window):
         self._load_images(reset=True)
     
     def _initialize_ui_state(self):
-        """Initialize UI state based on current settings."""
+        """Initialize UI state variables."""
+        # Initialize source manager
+        self.source_manager = SourceManager()
+        
+        # Initialize wallhaven specific settings
+        self.wallhaven_category = WallhavenCategory.from_list(settings.get("wallhaven_categories", ["general", "anime", "people"]))
+        self.wallhaven_purity = WallhavenPurity.from_list(settings.get("wallhaven_purity", ["sfw"]))
+        self.wallhaven_sorting = WallhavenSorting(settings.get("wallhaven_sorting", "date_added"))
+        self.wallhaven_method = "latest"  # Default method for sorting
+        
+        # Initialize search state
+        self.search_query = ""
+        self.selected_tags = []
+        self.selected_purity = ["sfw"]  # Default to SFW content
+        
+        # Initialize pagination state
+        self.current_page = 1
+        self.has_next_page = True
+        self.is_loading = False
+        
+        # Initialize images list
+        self.images = []
+        
         # Set search bar visibility based on current source
         if self.source_manager.current_source == ImageSource.WALLHAVEN:
             self.wallhaven_search_box.show_all()
@@ -66,23 +89,35 @@ class MainWindow(Gtk.Window):
     
     def _create_header_bar(self):
         """Create the header bar."""
-        header_bar = Gtk.HeaderBar()
-        header_bar.set_show_close_button(True)
-        header_bar.props.title = "PixelVault"
-        self.set_titlebar(header_bar)
+        header = Gtk.HeaderBar()
+        header.set_show_close_button(True)
+        header.props.title = "PixelVault"
         
-        # Source switcher
-        sources_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        # Create source selector
+        source_store = Gtk.ListStore(str)
+        source_store.append(["Wallhaven"])
+        source_store.append(["Waifu.im"])
+        source_store.append(["Waifu.pics"])
         
-        self.source_combo = Gtk.ComboBoxText()
-        self.source_combo.append_text("Wallhaven")
-        self.source_combo.append_text("Waifu.im")
-        self.source_combo.append_text("Waifu.pics")
-        self.source_combo.set_active(0)
+        self.source_combo = Gtk.ComboBox.new_with_model(source_store)
+        renderer_text = Gtk.CellRendererText()
+        self.source_combo.pack_start(renderer_text, True)
+        self.source_combo.add_attribute(renderer_text, "text", 0)
+        self.source_combo.set_active(0)  # Set Wallhaven as default
         self.source_combo.connect("changed", self._on_source_changed)
         
-        sources_box.pack_start(Gtk.Label.new("Source:"), False, False, 0)
-        sources_box.pack_start(self.source_combo, False, False, 0)
+        # Create settings button
+        settings_button = Gtk.Button()
+        settings_icon = Gio.ThemedIcon(name="preferences-system-symbolic")
+        settings_image = Gtk.Image.new_from_gicon(settings_icon, Gtk.IconSize.BUTTON)
+        settings_button.add(settings_image)
+        settings_button.connect("clicked", self._on_settings_clicked)
+        
+        # Add widgets to header
+        header.pack_start(self.source_combo)
+        header.pack_end(settings_button)
+        
+        self.set_titlebar(header)
         
         # Wallhaven search bar
         self.wallhaven_search_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -124,14 +159,6 @@ class MainWindow(Gtk.Window):
         tag_button = Gtk.Button.new_with_label("Select Tags")
         tag_button.connect("clicked", self._on_tag_button_clicked)
         
-        # Settings button
-        settings_button = Gtk.Button()
-        settings_icon = Gio.ThemedIcon(name="emblem-system-symbolic")
-        settings_image = Gtk.Image.new_from_gicon(settings_icon, Gtk.IconSize.BUTTON)
-        settings_button.set_image(settings_image)
-        settings_button.set_tooltip_text("Settings")
-        settings_button.connect("clicked", self._on_settings_clicked)
-        
         # Refresh button
         refresh_button = Gtk.Button.new_with_label("Refresh Images")
         refresh_icon = Gio.ThemedIcon(name="view-refresh-symbolic")
@@ -139,13 +166,11 @@ class MainWindow(Gtk.Window):
         refresh_button.set_image(refresh_image)
         refresh_button.connect("clicked", self._on_refresh_clicked)
         
-        header_bar.pack_start(sources_box)
-        header_bar.pack_start(self.wallhaven_search_box)
-        header_bar.pack_start(sort_box)
-        header_bar.pack_start(advanced_button)
-        header_bar.pack_start(tag_button)
-        header_bar.pack_end(refresh_button)
-        header_bar.pack_end(settings_button)
+        header.pack_start(self.wallhaven_search_box)
+        header.pack_start(sort_box)
+        header.pack_start(advanced_button)
+        header.pack_start(tag_button)
+        header.pack_end(refresh_button)
         
         # Initialize selected tags
         self.selected_tags = []
@@ -288,41 +313,46 @@ class MainWindow(Gtk.Window):
             combo: The ComboBox widget
         """
         # Get the selected source
-        source_text = combo.get_active_text()
-        
-        # Map to enum
-        if source_text == "Wallhaven":
-            self.source_manager.set_source(ImageSource.WALLHAVEN)
-            self.wallhaven_search_box.show_all()  # Show search bar for Wallhaven
-            # Show sort options for Wallhaven
-            self.sort_combo.set_sensitive(True)
-        elif source_text == "Waifu.im":
-            self.source_manager.set_source(ImageSource.WAIFUIM)
-            self.wallhaven_search_box.hide()  # Hide search bar for other sources
-            # Hide sort options for Waifu.im
-            self.sort_combo.set_sensitive(False)
-        elif source_text == "Waifu.pics":
-            self.source_manager.set_source(ImageSource.WAIFUPICS)
-            self.wallhaven_search_box.hide()  # Hide search bar for other sources
-            # Hide sort options for Waifu.pics
-            self.sort_combo.set_sensitive(False)
-        
-        # Clear selected tags when changing source
-        self.selected_tags = []
-        
-        # Clear search query when changing source
-        self.search_query = ""
-        self.wallhaven_search_entry.set_text("")
-        
-        # Reset pagination
-        self.current_page = 1
-        
-        # Clear the current flowbox
-        for child in self.flowbox.get_children():
-            self.flowbox.remove(child)
-        
-        # Load images for the new source
-        self._load_images(reset=True)
+        tree_iter = combo.get_active_iter()
+        if tree_iter is not None:
+            model = combo.get_model()
+            source_text = model[tree_iter][0]
+            print(f"Selected source: {source_text}")
+            
+            # Map to enum
+            if source_text == "Wallhaven":
+                self.source_manager.set_source(ImageSource.WALLHAVEN)
+                self.wallhaven_search_box.show_all()  # Show search bar for Wallhaven
+                # Show sort options for Wallhaven
+                self.sort_combo.set_sensitive(True)
+            elif source_text == "Waifu.im":
+                self.source_manager.set_source(ImageSource.WAIFUIM)
+                self.wallhaven_search_box.hide()  # Hide search bar for other sources
+                # Hide sort options for Waifu.im
+                self.sort_combo.set_sensitive(False)
+            elif source_text == "Waifu.pics":
+                print("Setting source to Waifu.pics")
+                self.source_manager.set_source(ImageSource.WAIFUPICS)
+                self.wallhaven_search_box.hide()  # Hide search bar for Waifu.pics
+                # Hide sort options for Waifu.pics
+                self.sort_combo.set_sensitive(False)
+            
+            # Clear selected tags when changing source
+            self.selected_tags = []
+            
+            # Clear search query when changing source
+            self.search_query = ""
+            self.wallhaven_search_entry.set_text("")
+            
+            # Reset pagination
+            self.current_page = 1
+            
+            # Clear the current flowbox
+            for child in self.flowbox.get_children():
+                self.flowbox.remove(child)
+            
+            # Load images for the new source
+            self._load_images(reset=True)
     
     def _on_advanced_button_clicked(self, button):
         """Handle advanced options button click.
@@ -739,44 +769,53 @@ class MainWindow(Gtk.Window):
         thread.start()
     
     def _fetch_images(self, reset=False):
-        """Fetch images from the selected source in a background thread.
+        """Fetch images from the current source.
         
         Args:
-            reset: Whether this is a reset (new search) or pagination
+            reset: Whether to reset the view
         """
-        try:
-            # Set loading flag
-            self.is_loading = True
-            
-            # Prepare kwargs based on the current source
-            kwargs = {}
-            
+        # If there are no more pages, don't fetch
+        if not reset and not self.has_next_page:
+            self.is_loading = False
+            return
+        
+        # Default parameters
+        params = {}
+        
+        # Get source name
+        source_name = self.source_manager.get_source_name()
+        print(f"Fetching images from source: {source_name}")
+        
+        # Source-specific parameters
+        if source_name == "Wallhaven":
             # Add Wallhaven-specific parameters
-            if self.source_manager.current_source == ImageSource.WALLHAVEN:
-                kwargs["categories"] = self.wallhaven_category
-                kwargs["purity"] = self.wallhaven_purity
-                
-                # Set method based on sorting
-                if self.wallhaven_sorting == WallhavenSorting.TOPLIST:
-                    kwargs["method"] = "top"
-                elif self.wallhaven_sorting == WallhavenSorting.RANDOM:
-                    kwargs["method"] = "random"
-                else:
-                    kwargs["method"] = "latest"
-                
-                # Add search query if provided
-                if self.search_query.strip():
-                    print(f"Searching Wallhaven for: {self.search_query}")
-                    kwargs["query"] = self.search_query
+            params["categories"] = self.wallhaven_category
+            params["purity"] = self.wallhaven_purity
+            params["sorting"] = self.wallhaven_sorting
+            params["method"] = self.wallhaven_method
             
-            # Get images from the current source with pagination
-            response = self.source_manager.get_images(
-                tags=self.selected_tags, 
-                page=self.current_page,
-                reset_seed=reset,  # Pass reset parameter to control seed behavior
-                **kwargs
-            )
+            # Add search query if available
+            if self.search_query:
+                params["query"] = self.search_query
             
+        elif source_name == "Waifu.im":
+            # For Waifu.im, we need to specify whether to include NSFW content
+            params["is_nsfw"] = "nsfw" in self.selected_purity
+            
+        elif source_name == "Waifu.pics":
+            # For Waifu.pics, we need to specify whether to include NSFW content
+            print(f"Fetching Waifu.pics images with tags: {self.selected_tags}")
+            params["is_nsfw"] = "nsfw" in self.selected_purity
+        
+        # Get images based on parameters
+        response = self.source_manager.get_images(
+            tags=self.selected_tags, 
+            page=self.current_page,
+            reset_seed=reset,
+            **params
+        )
+
+        try:
             # Get images and pagination info
             new_images = response.get("images", [])
             pagination = response.get("pagination", {})

@@ -3,7 +3,6 @@
 A GTK-based wallpaper app that fetches images from multiple sources:
 - Wallhaven
 - Waifu.im
-- Waifu.pics
 
 ## Features
 - Switch between different wallpaper sources
@@ -74,14 +73,10 @@ PixelVault integrates with the following APIs:
 - Provides anime-style character images with various tags
 - See full documentation at https://docs.waifu.im/
 
-### Waifu.pics
-- Uses the API at https://api.waifu.pics
-- Provides anime-style character images with various categories
-
 ## Usage
 
 ### Basic Navigation
-- Use the Source dropdown to switch between Wallhaven, Waifu.im, and Waifu.pics
+- Use the Source dropdown to switch between Wallhaven and Waifu.im
 - For Wallhaven, use the Sort dropdown to sort by Latest, Top, or Random
 - Click on any image to open it in a larger view
 - From the image view, you can download the image or set it as wallpaper

@@ -11,6 +11,34 @@ class Purity(Enum):
     SFW_NSFW = "101"         # SFW + NSFW
     SKETCHY_NSFW = "011"     # Sketchy + NSFW
     ALL = "111"              # SFW + Sketchy + NSFW
+    
+    @classmethod
+    def from_list(cls, purity_list: List[str]) -> 'Purity':
+        """Create a Purity enum from a list of purity levels.
+        
+        Args:
+            purity_list: List of purity levels e.g. ["sfw", "sketchy"]
+            
+        Returns:
+            Purity enum value
+        """
+        result = ["0", "0", "0"]
+        if "sfw" in purity_list:
+            result[0] = "1"
+        if "sketchy" in purity_list:
+            result[1] = "1"
+        if "nsfw" in purity_list:
+            result[2] = "1"
+            
+        value = "".join(result)
+        
+        # Find matching enum value
+        for p in cls:
+            if p.value == value:
+                return p
+                
+        # Default to SFW if no match
+        return cls.SFW
 
 class Category(Enum):
     """Categories for Wallhaven API."""
@@ -21,6 +49,34 @@ class Category(Enum):
     GENERAL_PEOPLE = "101"
     ANIME_PEOPLE = "011"
     ALL = "111"
+    
+    @classmethod
+    def from_list(cls, category_list: List[str]) -> 'Category':
+        """Create a Category enum from a list of categories.
+        
+        Args:
+            category_list: List of categories e.g. ["general", "anime"]
+            
+        Returns:
+            Category enum value
+        """
+        result = ["0", "0", "0"]
+        if "general" in category_list:
+            result[0] = "1"
+        if "anime" in category_list:
+            result[1] = "1"
+        if "people" in category_list:
+            result[2] = "1"
+            
+        value = "".join(result)
+        
+        # Find matching enum value
+        for c in cls:
+            if c.value == value:
+                return c
+                
+        # Default to ALL if no match
+        return cls.ALL
 
 class Sorting(Enum):
     """Sorting options for Wallhaven API."""
@@ -30,6 +86,22 @@ class Sorting(Enum):
     VIEWS = "views"
     FAVORITES = "favorites"
     TOPLIST = "toplist"
+    
+    def __new__(cls, value):
+        obj = object.__new__(cls)
+        obj._value_ = value
+        return obj
+    
+    @classmethod
+    def _missing_(cls, value):
+        """Handle missing values by returning a default."""
+        if isinstance(value, str):
+            # Check if value is a string matching any enum value
+            for member in cls:
+                if member.value == value:
+                    return member
+        # Default to DATE_ADDED if not found
+        return cls.DATE_ADDED
 
 class Order(Enum):
     """Order options for Wallhaven API."""
@@ -335,11 +407,16 @@ class WallhavenAPI:
         
         Args:
             page: Page number
-            **kwargs: Additional search parameters
+            **kwargs: Other parameters to pass to search
             
         Returns:
-            JSON response containing latest wallpapers
+            JSON response containing wallpapers
         """
+        # Remove sorting from kwargs if present
+        if 'sorting' in kwargs:
+            del kwargs['sorting']
+            
+        print(f"Fetching latest wallpapers, page {page}")
         return self.search(sorting=Sorting.DATE_ADDED, page=page, **kwargs)
     
     def get_top(self, page: int = 1, top_range: Union[str, TopRange] = TopRange.ONE_MONTH, **kwargs) -> Dict[str, Any]:
@@ -347,25 +424,39 @@ class WallhavenAPI:
         
         Args:
             page: Page number
-            top_range: Time range for toplist
-            **kwargs: Additional search parameters
+            top_range: Time range (1d, 3d, 1w, 1M, 3M, 6M, 1y)
+            **kwargs: Other parameters to pass to search
             
         Returns:
-            JSON response containing top wallpapers
+            JSON response containing wallpapers
         """
-        return self.search(sorting=Sorting.TOPLIST, top_range=top_range, page=page, **kwargs)
+        # Remove sorting and top_range from kwargs if present
+        if 'sorting' in kwargs:
+            del kwargs['sorting']
+        if 'top_range' in kwargs:
+            del kwargs['top_range']
+            
+        print(f"Fetching top wallpapers, page {page}")
+        return self.search(sorting=Sorting.TOPLIST, page=page, top_range=top_range, **kwargs)
     
     def get_random(self, page: int = 1, seed: Optional[str] = None, **kwargs) -> Dict[str, Any]:
         """Get random wallpapers.
         
         Args:
             page: Page number
-            seed: Seed for random results (to maintain consistency between pages)
-            **kwargs: Additional search parameters
+            seed: Seed for random sorting (to maintain consistency between pages)
+            **kwargs: Other parameters to pass to search
             
         Returns:
-            JSON response containing random wallpapers
+            JSON response containing wallpapers
         """
+        # Remove sorting and seed from kwargs if present
+        if 'sorting' in kwargs:
+            del kwargs['sorting']
+        if 'seed' in kwargs:
+            del kwargs['seed']
+            
+        print(f"Fetching random wallpapers, page {page}")
         return self.search(sorting=Sorting.RANDOM, page=page, seed=seed, **kwargs)
         
     def verify_api_key(self) -> bool:
