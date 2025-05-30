@@ -113,3 +113,4 @@ With auto-download enabled, any image you click on will be automatically saved t
 - **UI Modernization**: Improved grid view with better spacing, rounded corners, and hover effects
 - **Wallhaven API Key Support**: Added ability to use NSFW and Sketchy content with proper API key
 - **Enhanced Download Options**: Added options for organizing by source and customizing filename formats
+- **GIF Support**: Added support for animated GIFs with proper frame handling and animation display

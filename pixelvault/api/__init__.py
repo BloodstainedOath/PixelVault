@@ -280,9 +280,23 @@ class SourceManager:
             # Use first tag as category if provided, otherwise use 'waifu'
             category = 'waifu'  # Default category
             if tags and len(tags) > 0:
+                # Get the first tag and handle potential nsfw- prefix
                 category = tags[0]
-                print(f"Using category: {category} for waifu.pics (NSFW: {is_nsfw})")
+                
+                # If the tag has nsfw- prefix, strip it and ensure is_nsfw is True
+                if category.startswith("nsfw-"):
+                    category = category[5:]  # Remove "nsfw-" prefix
+                    is_nsfw = True
+                    print(f"NSFW tag detected, using category: {category} with NSFW mode")
+                else:
+                    print(f"Using category: {category} for waifu.pics (NSFW: {is_nsfw})")
             
+            # Validate that the category exists for the selected endpoint
+            valid_categories = self._waifupics_nsfw_categories if is_nsfw else self._waifupics_sfw_categories
+            if category not in valid_categories:
+                print(f"Warning: Category '{category}' is not valid for Waifu.pics. Using 'waifu' instead.")
+                category = 'waifu'  # Fall back to default if not valid
+                
             # Get multiple images
             response = self.waifupics.get_many(category=category, is_nsfw=is_nsfw)
             
@@ -392,8 +406,10 @@ class SourceManager:
             
             # Add NSFW categories
             for category in self._waifupics_nsfw_categories:
+                # Prefix NSFW tags with "nsfw-" to avoid duplicates with SFW tags
+                tag_name = f"nsfw-{category}"
                 result.append({
-                    "name": category,
+                    "name": tag_name,
                     "description": f"NSFW {category} images",
                     "category": "nsfw"
                 })

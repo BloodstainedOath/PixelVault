@@ -1,6 +1,6 @@
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GdkPixbuf, Gio, GLib
+from gi.repository import Gtk, GdkPixbuf, Gio, GLib, Gdk
 import os
 import threading
 import requests
@@ -9,7 +9,7 @@ import tempfile
 import subprocess
 from typing import List, Dict, Any, Optional
 from pathlib import Path
-from PIL import Image, PngImagePlugin
+from PIL import Image, PngImagePlugin, ImageSequence
 
 from ..api import SourceManager, ImageSource
 from ..api.wallhaven import Category as WallhavenCategory, Purity as WallhavenPurity, Sorting as WallhavenSorting
@@ -24,6 +24,33 @@ class MainWindow(Gtk.Window):
         Gtk.Window.__init__(self, title="PixelVault")
         self.set_default_size(1000, 700)
         self.connect("destroy", Gtk.main_quit)
+        
+        # Apply CSS to fix label sizing issues
+        css_provider = Gtk.CssProvider()
+        css_provider.load_from_data(b"""
+            label {
+                min-width: 50px;
+                min-height: 20px;
+            }
+            
+            .info-label {
+                min-width: 100px;
+            }
+            
+            .placeholder-label {
+                min-width: 100px;
+                min-height: 30px;
+            }
+        """)
+        
+        # Apply the CSS to all widgets
+        screen = Gdk.Screen.get_default()
+        style_context = Gtk.StyleContext()
+        style_context.add_provider_for_screen(
+            screen, 
+            css_provider, 
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
         
         # Initialize API source manager
         self.source_manager = SourceManager()
@@ -113,8 +140,15 @@ class MainWindow(Gtk.Window):
         settings_button.add(settings_image)
         settings_button.connect("clicked", self._on_settings_clicked)
         
+        # Add a label to display selected tags
+        self.tag_display = Gtk.Label()
+        self.tag_display.set_ellipsize(3)  # PANGO_ELLIPSIZE_END
+        self.tag_display.get_style_context().add_class("info-label")
+        self.tag_display.set_no_show_all(True)  # Initially hidden
+        
         # Add widgets to header
         header.pack_start(self.source_combo)
+        header.pack_start(self.tag_display)
         header.pack_end(settings_button)
         
         self.set_titlebar(header)
@@ -140,6 +174,9 @@ class MainWindow(Gtk.Window):
         # Sort dropdown menu (for Wallhaven)
         sort_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         
+        sort_label = Gtk.Label.new("Sort:")
+        sort_label.set_size_request(40, -1)  # Set minimum width for sort label
+        
         self.sort_combo = Gtk.ComboBoxText()
         self.sort_combo.append_text("Latest")
         self.sort_combo.append_text("Top")
@@ -148,7 +185,7 @@ class MainWindow(Gtk.Window):
         self.sort_combo.connect("changed", self._on_sort_changed)
         self.sort_combo.set_sensitive(False)
         
-        sort_box.pack_start(Gtk.Label.new("Sort:"), False, False, 0)
+        sort_box.pack_start(sort_label, False, False, 0)
         sort_box.pack_start(self.sort_combo, False, False, 0)
         
         # Advanced Options button
@@ -194,11 +231,13 @@ class MainWindow(Gtk.Window):
         
         self.status_label = Gtk.Label.new("Ready")
         self.status_label.set_markup("<span color='#888'>Ready</span>")
+        self.status_label.get_style_context().add_class("info-label")
         status_box.pack_start(self.status_label, False, False, 0)
         
         # Add refresh hint with modern styling
         refresh_hint = Gtk.Label.new("Click refresh to see more images")
         refresh_hint.set_markup("<span color='#888'><i>Scroll down to load more images</i></span>")
+        refresh_hint.get_style_context().add_class("info-label")
         status_box.pack_end(refresh_hint, False, False, 0)
         
         main_box.pack_start(status_box, False, False, 0)
@@ -339,6 +378,9 @@ class MainWindow(Gtk.Window):
             
             # Clear selected tags when changing source
             self.selected_tags = []
+            
+            # Clear tag display
+            self._update_tag_display()
             
             # Clear search query when changing source
             self.search_query = ""
@@ -629,18 +671,73 @@ class MainWindow(Gtk.Window):
                 "Apply", Gtk.ResponseType.OK
             )
         )
-        dialog.set_default_size(400, 400)
+        dialog.set_default_size(500, 500)
         
         # Get available tags for the current source
         available_tags = self.source_manager.get_available_tags()
         
+        # Create main container with margins
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        main_box.set_margin_start(15)
+        main_box.set_margin_end(15)
+        main_box.set_margin_top(15)
+        main_box.set_margin_bottom(15)
+        
+        # Create search box
+        search_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        search_entry = Gtk.SearchEntry()
+        search_entry.set_placeholder_text("Search tags...")
+        search_entry.set_tooltip_text("Type to filter tags")
+        search_box.pack_start(search_entry, True, True, 0)
+        
+        # Add source-specific warning for Waifu.pics
+        if self.source_manager.current_source == ImageSource.WAIFUPICS:
+            warning_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            warning_icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic", Gtk.IconSize.BUTTON)
+            warning_label = Gtk.Label()
+            warning_label.set_markup("<span color='orange'><b>Note:</b> Waifu.pics only supports using one tag/category at a time. Only the first selected tag will be used.</span>")
+            warning_label.set_line_wrap(True)
+            warning_label.set_xalign(0)
+            warning_box.pack_start(warning_icon, False, False, 0)
+            warning_box.pack_start(warning_label, True, True, 0)
+            main_box.pack_start(warning_box, False, False, 0)
+        
+        # Add currently selected tags display
+        tags_box = Gtk.FlowBox()
+        tags_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        tags_box.set_max_children_per_line(5)
+        tags_box.set_min_children_per_line(1)
+        tags_box.set_homogeneous(False)
+        tags_box.set_row_spacing(5)
+        tags_box.set_column_spacing(5)
+        
+        # Add info label if no tags are selected
+        if not self.selected_tags:
+            info_label = Gtk.Label.new("No tags selected")
+            info_label.set_markup("<i>No tags selected</i>")
+            info_label.get_style_context().add_class("info-label")
+            tags_box.add(info_label)
+        else:
+            # Add selected tags as badges
+            for tag_name in self.selected_tags:
+                tag_box = self._create_tag_badge(tag_name, removable=True)
+                tags_box.add(tag_box)
+        
+        # Create a frame for selected tags
+        selected_frame = Gtk.Frame()
+        selected_frame.set_label("Selected Tags")
+        selected_frame.set_label_align(0.5, 0.5)
+        selected_frame.set_shadow_type(Gtk.ShadowType.ETCHED_IN)
+        selected_frame.add(tags_box)
+        
         # Create scrolled window for the tag list
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_min_content_height(300)
         
         # Create a list box for tags
         list_box = Gtk.ListBox()
-        list_box.set_selection_mode(Gtk.SelectionMode.MULTIPLE)
+        list_box.set_selection_mode(Gtk.SelectionMode.NONE)
         
         # Create a dictionary to store references to check buttons
         check_buttons = {}
@@ -653,13 +750,58 @@ class MainWindow(Gtk.Window):
                 categories[category] = []
             categories[category].append(tag)
         
+        # Sort categories for better organization
+        sorted_categories = sorted(categories.keys())
+        
+        # Function to update list based on search
+        def filter_tags(entry):
+            search_text = entry.get_text().lower()
+            for category, tags in categories.items():
+                # Get the category header
+                header_row = category_headers.get(category)
+                if header_row:
+                    # Hide/show category based on if any children match
+                    any_visible = False
+                    
+                    # Check each tag in this category
+                    for tag in tags:
+                        tag_name = tag.get("name", "").lower()
+                        row = tag_rows.get(tag_name)
+                        
+                        if search_text and search_text not in tag_name:
+                            if row:
+                                row.hide()
+                        else:
+                            if row:
+                                row.show()
+                                any_visible = True
+                    
+                    # Show/hide header based on if any tags are visible
+                    if any_visible:
+                        header_row.show()
+                    else:
+                        header_row.hide()
+        
+        # Connect search entry to filter function
+        search_entry.connect("search-changed", filter_tags)
+        
+        # Dictionary to store references to rows for filtering
+        category_headers = {}
+        tag_rows = {}
+        
         # Add tags to the list box, grouped by category
-        for category, tags in categories.items():
+        for category in sorted_categories:
+            tags = categories[category]
+            
+            # Skip empty categories
+            if not tags:
+                continue
+                
             # Add category header
             category_label = Gtk.Label()
             category_label.set_markup(f"<b>{category.upper()}</b>")
             category_label.set_halign(Gtk.Align.START)
-            category_label.set_margin_top(10)
+            category_label.set_margin_top(15)
             category_label.set_margin_bottom(5)
             category_label.set_margin_start(5)
             
@@ -668,8 +810,14 @@ class MainWindow(Gtk.Window):
             category_row.set_selectable(False)
             list_box.add(category_row)
             
+            # Store reference to category header
+            category_headers[category] = category_row
+            
+            # Sort tags by name within category
+            sorted_tags = sorted(tags, key=lambda x: x.get("name", "").lower())
+            
             # Add tags in this category
-            for tag in tags:
+            for tag in sorted_tags:
                 tag_name = tag.get("name", "")
                 tag_description = tag.get("description", "")
                 
@@ -682,8 +830,7 @@ class MainWindow(Gtk.Window):
                 
                 # Create a check button for the tag
                 check_button = Gtk.CheckButton.new_with_label(tag_name)
-                if tag_description:
-                    check_button.set_tooltip_text(tag_description)
+                check_button.set_tooltip_text(tag_description or f"{tag_name} tag")
                 
                 # Set check button state based on selected tags
                 if tag_name in self.selected_tags:
@@ -694,32 +841,92 @@ class MainWindow(Gtk.Window):
                 
                 tag_box.pack_start(check_button, False, False, 0)
                 
+                # Add preview badge to show what the tag will look like
+                preview_badge = self._create_tag_badge(tag_name, removable=False, mini=True, check_buttons_ref=check_buttons)
+                tag_box.pack_end(preview_badge, False, False, 0)
+                
                 tag_row = Gtk.ListBoxRow()
                 tag_row.add(tag_box)
+                tag_row.set_selectable(False)
                 list_box.add(tag_row)
+                
+                # Store reference to row for filtering
+                tag_rows[tag_name.lower()] = tag_row
+        
+        # Add action buttons
+        buttons_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         
         # Add "Clear selection" button
         clear_button = Gtk.Button.new_with_label("Clear Selection")
-        clear_button.set_margin_top(10)
+        clear_button.set_tooltip_text("Remove all selected tags")
         
         def on_clear_button_clicked(button):
-            """Handle clear button click.
-            
-            Args:
-                button: The Button widget
-            """
+            """Handle clear button click."""
             for button in check_buttons.values():
                 button.set_active(False)
+                
+            # Update selected tags display
+            for child in tags_box.get_children():
+                tags_box.remove(child)
+                
+            info_label = Gtk.Label.new("No tags selected")
+            info_label.set_markup("<i>No tags selected</i>")
+            info_label.get_style_context().add_class("info-label")
+            tags_box.add(info_label)
+            tags_box.show_all()
         
         clear_button.connect("clicked", on_clear_button_clicked)
         
+        # Add "Popular Tags" button
+        if self.source_manager.current_source == ImageSource.WALLHAVEN:
+            popular_button = Gtk.Button.new_with_label("Popular Tags")
+            popular_button.set_tooltip_text("Select commonly used tags")
+            
+            def on_popular_button_clicked(button):
+                """Handle popular tags button click."""
+                # These are popular tags for Wallhaven
+                popular_tags = ["nature", "landscape", "anime", "digital art", "minimalism"]
+                
+                # Select those tags
+                for tag_name, button in check_buttons.items():
+                    if tag_name in popular_tags:
+                        button.set_active(True)
+                    
+                # Update tag badges
+                self._update_tag_badges(tags_box, popular_tags, check_buttons)
+            
+            popular_button.connect("clicked", on_popular_button_clicked)
+            buttons_box.pack_start(popular_button, True, True, 0)
+            
+        buttons_box.pack_start(clear_button, True, True, 0)
+        
+        # Add elements to main box
+        main_box.pack_start(search_box, False, False, 0)
+        main_box.pack_start(selected_frame, False, False, 10)
+        
         # Add the list box to the scrolled window
         scrolled.add(list_box)
+        main_box.pack_start(scrolled, True, True, 0)
+        main_box.pack_start(buttons_box, False, False, 0)
         
-        # Add the scrolled window to the dialog
-        box = dialog.get_content_area()
-        box.pack_start(scrolled, True, True, 0)
-        box.pack_start(clear_button, False, False, 0)
+        # Add the main box to the dialog
+        content_area = dialog.get_content_area()
+        content_area.add(main_box)
+        
+        # Function to update tags when check buttons change
+        def on_check_button_toggled(button, tag_name):
+            """Handle check button toggle."""
+            is_active = button.get_active()
+            
+            # Get current selected tags
+            selected = [tag for tag_name, button in check_buttons.items() if button.get_active()]
+            
+            # Update selected tags display
+            self._update_tag_badges(tags_box, selected, check_buttons)
+        
+        # Connect signals to check buttons
+        for tag_name, button in check_buttons.items():
+            button.connect("toggled", on_check_button_toggled, tag_name)
         
         # Show all widgets
         dialog.show_all()
@@ -733,10 +940,287 @@ class MainWindow(Gtk.Window):
                 if button.get_active():
                     self.selected_tags.append(tag_name)
             
+            # Special handling for Waifu.pics when multiple tags are selected
+            if self.source_manager.current_source == ImageSource.WAIFUPICS and len(self.selected_tags) > 1:
+                active_tag = self.selected_tags[0]
+                info_dialog = Gtk.MessageDialog(
+                    transient_for=self,
+                    flags=0,
+                    message_type=Gtk.MessageType.INFO,
+                    buttons=Gtk.ButtonsType.OK,
+                    text="Multiple Tags Selected"
+                )
+                info_dialog.format_secondary_text(
+                    f"Waifu.pics only supports one tag/category at a time.\n\n"
+                    f"Only the first tag '{active_tag}' will be used for searching images."
+                )
+                info_dialog.run()
+                info_dialog.destroy()
+            
+            # Update tag display in the header
+            self._update_tag_display()
+            
             # Refresh images with the selected tags (reset to page 1)
             self._load_images(reset=True)
         
         dialog.destroy()
+    
+    def _update_tag_display(self):
+        """Update the tag display in the header bar."""
+        if self.selected_tags:
+            # Format the tag strings for display
+            formatted_tags = []
+            for tag in self.selected_tags:
+                if tag.startswith("nsfw-"):
+                    # Format NSFW tags
+                    formatted_tags.append(f"{tag[5:].title()} (NSFW)")
+                else:
+                    formatted_tags.append(tag)
+                    
+            tag_str = ", ".join(formatted_tags)
+            if len(tag_str) > 30:
+                tag_str = tag_str[:27] + "..."
+            self.tag_display.set_markup(f"<small><b>Tags:</b> {tag_str}</small>")
+            self.tag_display.show()
+            
+            # Also update status label
+            self.status_label.set_text(f"Tags: {tag_str}")
+        else:
+            self.tag_display.hide()
+            self.status_label.set_text("Ready")
+    
+    def _create_tag_badge(self, tag_name, removable=False, mini=False, check_buttons_ref=None):
+        """Create a visual badge for a tag.
+        
+        Args:
+            tag_name: Name of the tag (string or dict with 'name' key)
+            removable: Whether to add a remove button
+            mini: Whether to use a mini version (for previews)
+            check_buttons_ref: Reference to check buttons for tag selection
+            
+        Returns:
+            A Gtk.Box containing the tag badge
+        """
+        # Handle case when tag_name is a dictionary
+        if isinstance(tag_name, dict) and 'name' in tag_name:
+            tag_name = tag_name['name']
+            
+        # Ensure tag_name is a string
+        tag_name = str(tag_name)
+        
+        # Create a box for the tag badge
+        badge_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        badge_box.set_name(f"tag-{tag_name}")
+        
+        # Determine category color based on tag name
+        category_class = "tag-other"
+        
+        # For Waifu.pics, handle nsfw- prefixed tags
+        display_name = tag_name
+        is_nsfw_tag = tag_name.startswith("nsfw-")
+        if is_nsfw_tag:
+            # Add NSFW class for styling
+            category_class = "tag-nsfw"
+            # Display a better formatted version of the tag name
+            display_name = tag_name[5:].title() + " (NSFW)"
+        else:
+            # Find the tag in available tags to get its category
+            if self.source_manager.current_source == ImageSource.WALLHAVEN:
+                available_tags = self.source_manager.get_available_tags()
+                for tag in available_tags:
+                    if tag.get("name") == tag_name:
+                        category = tag.get("category", "other")
+                        category_class = f"tag-{category.lower()}"
+                        break
+        
+        # Create CSS for the badge
+        css_provider = Gtk.CssProvider()
+        css_provider.load_from_data(b"""
+            box {
+                background-color: rgba(60, 60, 70, 0.3);
+                border-radius: 12px;
+                padding: 2px 8px;
+                margin: 2px;
+                transition: all 0.2s ease;
+            }
+            
+            box:hover {
+                background-color: rgba(70, 70, 90, 0.4);
+            }
+            
+            button.tag-remove-button {
+                padding: 0;
+                margin: 0;
+                min-height: 16px;
+                min-width: 16px;
+                opacity: 0.7;
+                transition: opacity 0.2s ease;
+            }
+            
+            button.tag-remove-button:hover {
+                opacity: 1.0;
+            }
+            
+            .tag-label {
+                color: #eee;
+                font-size: 12px;
+            }
+            
+            .mini-tag {
+                padding: 1px 4px;
+                margin: 1px;
+            }
+            
+            .mini-tag .tag-label {
+                font-size: 10px;
+            }
+            
+            /* NSFW tags */
+            .tag-nsfw {
+                background-color: rgba(231, 76, 60, 0.3);
+                border-left: 3px solid rgba(231, 76, 60, 0.8);
+            }
+            
+            /* Category-specific colors */
+            .tag-anime {
+                background-color: rgba(230, 126, 34, 0.3);
+                border-left: 3px solid rgba(230, 126, 34, 0.8);
+            }
+            
+            .tag-nature {
+                background-color: rgba(46, 204, 113, 0.3);
+                border-left: 3px solid rgba(46, 204, 113, 0.8);
+            }
+            
+            .tag-urban {
+                background-color: rgba(52, 152, 219, 0.3);
+                border-left: 3px solid rgba(52, 152, 219, 0.8);
+            }
+            
+            .tag-art {
+                background-color: rgba(155, 89, 182, 0.3);
+                border-left: 3px solid rgba(155, 89, 182, 0.8);
+            }
+            
+            .tag-fiction {
+                background-color: rgba(241, 196, 15, 0.3);
+                border-left: 3px solid rgba(241, 196, 15, 0.8);
+            }
+            
+            .tag-science {
+                background-color: rgba(41, 128, 185, 0.3);
+                border-left: 3px solid rgba(41, 128, 185, 0.8);
+            }
+            
+            .tag-technology {
+                background-color: rgba(52, 73, 94, 0.3);
+                border-left: 3px solid rgba(52, 73, 94, 0.8);
+            }
+            
+            .tag-design {
+                background-color: rgba(231, 76, 60, 0.3);
+                border-left: 3px solid rgba(231, 76, 60, 0.8);
+            }
+            
+            .tag-vehicles {
+                background-color: rgba(192, 57, 43, 0.3);
+                border-left: 3px solid rgba(192, 57, 43, 0.8);
+            }
+            
+            .tag-photography {
+                background-color: rgba(127, 140, 141, 0.3);
+                border-left: 3px solid rgba(127, 140, 141, 0.8);
+            }
+            
+            .tag-seasons {
+                background-color: rgba(26, 188, 156, 0.3);
+                border-left: 3px solid rgba(26, 188, 156, 0.8);
+            }
+            
+            .tag-other {
+                background-color: rgba(189, 195, 199, 0.3);
+                border-left: 3px solid rgba(189, 195, 199, 0.8);
+            }
+        """)
+        
+        # Apply CSS
+        badge_box.get_style_context().add_provider(
+            css_provider, 
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+        
+        # Add category class
+        badge_box.get_style_context().add_class(category_class)
+        
+        # Add mini class if mini version
+        if mini:
+            badge_box.get_style_context().add_class("mini-tag")
+        
+        # Add tag name label
+        tag_label = Gtk.Label.new(display_name)
+        tag_label.get_style_context().add_class("tag-label")
+        badge_box.pack_start(tag_label, False, False, 0)
+        
+        # Add remove button if removable
+        if removable:
+            remove_button = Gtk.Button()
+            remove_button.set_tooltip_text(f"Remove {display_name}")
+            
+            # Create a small X icon
+            remove_icon = Gtk.Image.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
+            remove_button.add(remove_icon)
+            
+            # Style the button
+            remove_button.get_style_context().add_class("tag-remove-button")
+            
+            # Connect the remove signal
+            def on_remove_clicked(button):
+                # Find and uncheck the corresponding check button
+                if tag_name in check_buttons_ref:
+                    check_buttons_ref[tag_name].set_active(False)
+                
+                # Remove this badge
+                badge_box.get_parent().destroy()
+                
+                # If no more badges, add the info label
+                if not any(isinstance(child.get_child(), Gtk.Box) for child in tags_box.get_children()):
+                    info_label = Gtk.Label.new("No tags selected")
+                    info_label.set_markup("<i>No tags selected</i>")
+                    info_label.get_style_context().add_class("info-label")
+                    tags_box.add(info_label)
+                    tags_box.show_all()
+            
+            remove_button.connect("clicked", on_remove_clicked)
+            badge_box.pack_end(remove_button, False, False, 0)
+        
+        return badge_box
+    
+    def _update_tag_badges(self, tags_box, selected_tags, check_buttons_ref):
+        """Update the tag badges display.
+        
+        Args:
+            tags_box: The FlowBox containing tag badges
+            selected_tags: List of selected tag names
+            check_buttons_ref: Reference to check buttons for tag selection
+        """
+        # Remove all children
+        for child in tags_box.get_children():
+            tags_box.remove(child)
+        
+        # If no tags selected, add info label
+        if not selected_tags:
+            info_label = Gtk.Label.new("No tags selected")
+            info_label.set_markup("<i>No tags selected</i>")
+            info_label.get_style_context().add_class("info-label")
+            tags_box.add(info_label)
+        else:
+            # Add badges for each selected tag
+            for tag_name in selected_tags:
+                tag_box = self._create_tag_badge(tag_name, removable=True, check_buttons_ref=check_buttons_ref)
+                tags_box.add(tag_box)
+        
+        tags_box.show_all()
+    
     
     def _on_refresh_clicked(self, button):
         """Handle refresh button click.
@@ -941,8 +1425,10 @@ class MainWindow(Gtk.Window):
         """
         # Create placeholder widgets first
         placeholder_label = Gtk.Label.new("Loading...")
+        placeholder_label.set_markup("<span color='#888'>Loading...</span>")
+        placeholder_label.get_style_context().add_class("placeholder-label")
         
-        # Add placeholders to box immediately
+        # Add the placeholder to the box and show all elements
         GLib.idle_add(lambda: box.pack_start(placeholder_label, True, True, 0) or box.show_all())
         
         try:
@@ -958,6 +1444,10 @@ class MainWindow(Gtk.Window):
             # Store response content directly
             data_bytes = response.content
             
+            # Helper function to check if data is a GIF
+            def is_gif(data):
+                return len(data) > 3 and data[:3] == b'GIF'
+            
             def update_ui(image_data, data):
                 try:
                     # Remove placeholders
@@ -971,6 +1461,8 @@ class MainWindow(Gtk.Window):
                         loader.close()
                         
                         pixbuf = loader.get_pixbuf()
+                        is_animation = is_gif(data) and hasattr(loader, 'get_animation')
+                        animation = loader.get_animation() if is_animation else None
                         
                         # Get actual dimensions from pixbuf
                         actual_width = pixbuf.get_width()
@@ -995,10 +1487,15 @@ class MainWindow(Gtk.Window):
                             new_height = max_height
                             new_width = int(width * (max_height / height))
                         
-                        scaled_pixbuf = pixbuf.scale_simple(new_width, new_height, GdkPixbuf.InterpType.BILINEAR)
-                        
-                        # Create image widget
-                        image_widget = Gtk.Image.new_from_pixbuf(scaled_pixbuf)
+                        # Create image widget - use animation if available
+                        if is_animation and animation and not animation.is_static_image():
+                            scaled_animation = animation  # GIF animations need special handling
+                            image_widget = Gtk.Image.new_from_animation(scaled_animation)
+                            # Mark this as a GIF in the image data
+                            image_data['is_gif'] = True
+                        else:
+                            scaled_pixbuf = pixbuf.scale_simple(new_width, new_height, GdkPixbuf.InterpType.BILINEAR)
+                            image_widget = Gtk.Image.new_from_pixbuf(scaled_pixbuf)
                         
                         # Store the image data
                         setattr(image_widget, 'image_data', image_data)
@@ -1020,12 +1517,19 @@ class MainWindow(Gtk.Window):
                             res_label.set_ellipsize(3)
                             meta_box.pack_start(res_label, False, False, 0)
                         
+                        # Add GIF indicator if applicable
+                        if image_data.get('is_gif'):
+                            gif_label = Gtk.Label.new("GIF")
+                            gif_label.set_ellipsize(3)
+                            meta_box.pack_start(gif_label, False, False, 0)
+                        
                         # Add metadata box
                         box.pack_start(meta_box, False, False, 0)
                         box.show_all()
                     except Exception as e:
                         print(f"Error processing image data: {e}")
                         error_label = Gtk.Label.new(f"Error: {str(e)}")
+                        error_label.get_style_context().add_class("info-label")
                         box.pack_start(error_label, True, True, 0)
                         box.show_all()
                     
@@ -1034,6 +1538,7 @@ class MainWindow(Gtk.Window):
                     print(f"Error in update_ui: {e}")
                     # Show error instead
                     error_label = Gtk.Label.new("Error")
+                    error_label.get_style_context().add_class("info-label")
                     box.pack_start(error_label, True, True, 0)
                     box.show_all()
                     return False  # Remove idle callback
@@ -1041,14 +1546,16 @@ class MainWindow(Gtk.Window):
             GLib.idle_add(update_ui, image, data_bytes)
             
         except Exception as e:
-            print(f"Error loading thumbnail: {e}")
+            print(f"Error loading image: {e}")
             
             def show_error():
                 # Remove placeholders
                 for child in box.get_children():
-                    box.remove(child)
-                
+                    if child == placeholder_label:
+                        box.remove(child)
+                        
                 error_label = Gtk.Label.new("Error loading image")
+                error_label.get_style_context().add_class("info-label")
                 box.pack_start(error_label, True, True, 0)
                 box.show_all()
                 return False  # Remove idle callback
@@ -1166,14 +1673,16 @@ class MainWindow(Gtk.Window):
         # Get image ID
         image_id = image_data.get("id", "image")
         
-        # Get file extension from URL
+        # Get file extension from URL or from is_gif flag
         url = image_data.get("url", "")
-        if url.lower().endswith(".jpg") or url.lower().endswith(".jpeg"):
+        if image_data.get('is_gif', False) or url.lower().endswith(".gif"):
+            ext = ".gif"
+        elif url.lower().endswith(".jpg") or url.lower().endswith(".jpeg"):
             ext = ".jpg"
         elif url.lower().endswith(".png"):
             ext = ".png"
         else:
-            ext = ".jpg"
+            ext = ".jpg"  # Default to jpg if unknown
         
         # Format filename according to settings
         filename_format = settings.get("filename_format", "original")
@@ -1466,9 +1975,11 @@ class MainWindow(Gtk.Window):
         
         # Set suggested filename based on image id
         image_id = image_data.get("id", "image")
-        # Add file extension based on URL
+        # Add file extension based on URL or is_gif flag
         url = image_data.get("url", "")
-        if url.lower().endswith(".jpg") or url.lower().endswith(".jpeg"):
+        if image_data.get('is_gif', False) or url.lower().endswith(".gif"):
+            dialog.set_current_name(f"{image_id}.gif")
+        elif url.lower().endswith(".jpg") or url.lower().endswith(".jpeg"):
             dialog.set_current_name(f"{image_id}.jpg")
         elif url.lower().endswith(".png"):
             dialog.set_current_name(f"{image_id}.png")
@@ -1480,6 +1991,7 @@ class MainWindow(Gtk.Window):
         filter_images.set_name("Image files")
         filter_images.add_mime_type("image/jpeg")
         filter_images.add_mime_type("image/png")
+        filter_images.add_mime_type("image/gif")
         dialog.add_filter(filter_images)
         
         # Show the dialog
@@ -1519,6 +2031,9 @@ class MainWindow(Gtk.Window):
             print(f"URL: {image_data.get('url', 'unknown')}")
             print(f"Resolution: {image_data.get('width', 'unknown')}x{image_data.get('height', 'unknown')}")
             
+            # Check if it's a GIF based on either the path or is_gif flag
+            is_gif = image_data.get('is_gif', False) or save_path.lower().endswith('.gif')
+            
             # Save to file preserving original quality
             with open(save_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
@@ -1530,7 +2045,7 @@ class MainWindow(Gtk.Window):
                 # Open image with PIL to update metadata
                 img = Image.open(save_path)
                 
-                # Extract actual image dimensions from the file
+                # Extract actual dimensions from the file
                 width, height = img.size
                 
                 # Update image_data with actual dimensions if they weren't set
@@ -1538,6 +2053,19 @@ class MainWindow(Gtk.Window):
                     image_data['width'] = width
                     image_data['height'] = height
                     print(f"Updated dimensions from file: {width}x{height}")
+                
+                # Get frame count for GIFs
+                frame_count = 1
+                if is_gif:
+                    try:
+                        # Count frames in GIF
+                        frame_count = 0
+                        for frame in ImageSequence.Iterator(img):
+                            frame_count += 1
+                        print(f"GIF has {frame_count} frames")
+                        image_data['frames'] = frame_count
+                    except Exception as e:
+                        print(f"Error counting GIF frames: {e}")
                 
                 # Create metadata dictionary for PNG files
                 metadata = PngImagePlugin.PngInfo() if save_path.lower().endswith('.png') else None
@@ -1564,6 +2092,9 @@ class MainWindow(Gtk.Window):
                         metadata.add_text("Source", str(image_data.get('source')))
                     if image_data.get('width') and image_data.get('height'):
                         metadata.add_text("Resolution", f"{image_data.get('width')}x{image_data.get('height')}")
+                    # Add frame count metadata for GIFs
+                    if is_gif and image_data.get('frames'):
+                        metadata.add_text("Frames", str(image_data.get('frames')))
                     if tag_list:
                         metadata.add_text("Tags", ", ".join(tag_list))
                     
@@ -1582,6 +2113,11 @@ class MainWindow(Gtk.Window):
             message = f"Image auto-downloaded to {filename}" if is_auto_download else f"Image downloaded to {filename}"
             GLib.idle_add(lambda: self.status_label.set_text(message))
             
+            # Add GIF frame info to notification if applicable
+            gif_info = ""
+            if is_gif and image_data.get('frames', 0) > 1:
+                gif_info = f"\nGIF Animation: {image_data.get('frames')} frames"
+            
             # Show notification of successful download
             def show_success_notification():
                 notification_dialog = Gtk.MessageDialog(
@@ -1596,10 +2132,10 @@ class MainWindow(Gtk.Window):
                 if image_data.get('width') and image_data.get('height'):
                     notification_dialog.format_secondary_text(
                         f"Image saved to: {save_path}\n"
-                        f"Resolution: {image_data.get('width')}x{image_data.get('height')}"
+                        f"Resolution: {image_data.get('width')}x{image_data.get('height')}{gif_info}"
                     )
                 else:
-                    notification_dialog.format_secondary_text(f"Image saved to: {save_path}")
+                    notification_dialog.format_secondary_text(f"Image saved to: {save_path}{gif_info}")
                 
                 # Add button to open folder
                 notification_dialog.add_button("Open Folder", Gtk.ResponseType.HELP)
@@ -1617,26 +2153,25 @@ class MainWindow(Gtk.Window):
             # Show notification for manual downloads, or if auto-download setting requests it
             if not is_auto_download or settings.get("show_auto_download_notification", True):
                 GLib.idle_add(show_success_notification)
-            
+        
         except Exception as e:
-            # Show error message
-            GLib.idle_add(lambda: self.status_label.set_text(f"Error downloading image: {str(e)}"))
+            print(f"Error downloading image: {e}")
             
-            # Show error dialog only if not auto-download
-            if not is_auto_download:
-                def show_error_dialog():
-                    dialog = Gtk.MessageDialog(
-                        transient_for=self,
-                        flags=0,
-                        message_type=Gtk.MessageType.ERROR,
-                        buttons=Gtk.ButtonsType.OK,
-                        text="Error downloading image"
-                    )
-                    dialog.format_secondary_text(f"Error: {str(e)}\n\nURL: {image_data['url']}")
-                    dialog.run()
-                    dialog.destroy()
-                
-                GLib.idle_add(show_error_dialog)
+            def show_error_dialog():
+                dialog = Gtk.MessageDialog(
+                    transient_for=self,
+                    flags=0,
+                    message_type=Gtk.MessageType.ERROR,
+                    buttons=Gtk.ButtonsType.OK,
+                    text="Download Failed"
+                )
+                dialog.format_secondary_text(str(e))
+                dialog.run()
+                dialog.destroy()
+                return False  # Remove idle callback
+            
+            GLib.idle_add(lambda: self.status_label.set_text(f"Error: {str(e)}"))
+            GLib.idle_add(show_error_dialog)
     
     def _load_preview_image(self, image_data: Dict[str, Any], box: Gtk.Box):
         """Load preview image for the dialog.
@@ -1647,6 +2182,8 @@ class MainWindow(Gtk.Window):
         """
         # Create placeholder
         placeholder_label = Gtk.Label.new("Loading preview...")
+        placeholder_label.set_markup("<span color='#888'>Loading preview...</span>")
+        placeholder_label.get_style_context().add_class("placeholder-label")
         
         # Add placeholder to UI immediately
         GLib.idle_add(lambda: box.pack_start(placeholder_label, False, False, 0) or box.reorder_child(placeholder_label, 0) or box.show_all())
@@ -1659,6 +2196,10 @@ class MainWindow(Gtk.Window):
             
             # Read the data
             data_bytes = response.content
+            
+            # Helper function to check if data is a GIF
+            def is_gif(data):
+                return len(data) > 3 and data[:3] == b'GIF'
             
             # Update the image in the main thread
             def update_image(data, placeholder):
@@ -1675,6 +2216,8 @@ class MainWindow(Gtk.Window):
                         loader.close()
                         
                         pixbuf = loader.get_pixbuf()
+                        is_animation = is_gif(data) and hasattr(loader, 'get_animation')
+                        animation = loader.get_animation() if is_animation else None
                         
                         # Get actual dimensions from pixbuf
                         actual_width = pixbuf.get_width()
@@ -1699,24 +2242,30 @@ class MainWindow(Gtk.Window):
                             new_height = min(height, max_height)
                             new_width = int(width * (new_height / height))
                         
-                        scaled_pixbuf = pixbuf.scale_simple(new_width, new_height, GdkPixbuf.InterpType.BILINEAR)
+                        # Create and add image widget - use animation if available
+                        if is_animation and animation and not animation.is_static_image():
+                            # For GIF animations
+                            image_data['is_gif'] = True
+                            image_widget = Gtk.Image.new_from_animation(animation)
+                        else:
+                            scaled_pixbuf = pixbuf.scale_simple(new_width, new_height, GdkPixbuf.InterpType.BILINEAR)
+                            image_widget = Gtk.Image.new_from_pixbuf(scaled_pixbuf)
                         
-                        # Create and add image widget
-                        image_widget = Gtk.Image.new_from_pixbuf(scaled_pixbuf)
                         box.pack_start(image_widget, False, False, 0)
                         box.reorder_child(image_widget, 0)
                         box.show_all()
                     except Exception as e:
                         print(f"Error processing preview image: {e}")
                         error_label = Gtk.Label.new(f"Error: {str(e)}")
-                        box.pack_start(error_label, False, False, 0)
-                        box.reorder_child(error_label, 0)
+                        error_label.set_size_request(100, 30)  # Set minimum size for error label
+                        box.pack_start(error_label, True, True, 0)
                         box.show_all()
                     
                     return False  # Remove idle callback
                 except Exception as e:
                     print(f"Error in update_image: {e}")
                     error_label = Gtk.Label.new("Error loading full image")
+                    error_label.set_size_request(100, 30)  # Set minimum size for error label
                     box.pack_start(error_label, False, False, 0)
                     box.reorder_child(error_label, 0)
                     box.show_all()
@@ -1734,8 +2283,8 @@ class MainWindow(Gtk.Window):
                         box.remove(child)
                         
                 error_label = Gtk.Label.new("Error loading full image")
-                box.pack_start(error_label, False, False, 0)
-                box.reorder_child(error_label, 0)
+                error_label.get_style_context().add_class("info-label")
+                box.pack_start(error_label, True, True, 0)
                 box.show_all()
                 return False  # Remove idle callback
             
@@ -1756,7 +2305,28 @@ class MainWindow(Gtk.Window):
             # Determine appropriate file extension
             url = image_data["url"].lower()
             ext = ".jpg"  # Default extension
-            if url.endswith(".png"):
+            
+            # Handle GIF files
+            if image_data.get('is_gif', False) or url.endswith(".gif"):
+                ext = ".gif"
+                # For GIFs, we might want to warn the user they'll only see the first frame as wallpaper
+                dialog = Gtk.MessageDialog(
+                    transient_for=self,
+                    flags=0,
+                    message_type=Gtk.MessageType.INFO,
+                    buttons=Gtk.ButtonsType.OK_CANCEL,
+                    text="GIF Animation Warning"
+                )
+                dialog.format_secondary_text(
+                    "Setting an animated GIF as wallpaper will only use its first frame.\n"
+                    "Do you want to continue?"
+                )
+                response = dialog.run()
+                dialog.destroy()
+                
+                if response != Gtk.ResponseType.OK:
+                    return  # User canceled
+            elif url.endswith(".png"):
                 ext = ".png"
             elif url.endswith(".jpeg"):
                 ext = ".jpg"
@@ -1875,10 +2445,13 @@ class MainWindow(Gtk.Window):
         # Update sorting based on selection
         if active == 0:  # Latest
             self.wallhaven_sorting = WallhavenSorting.DATE_ADDED
+            self.wallhaven_method = "latest"
         elif active == 1:  # Top
             self.wallhaven_sorting = WallhavenSorting.TOPLIST
+            self.wallhaven_method = "top"
         elif active == 2:  # Random
             self.wallhaven_sorting = WallhavenSorting.RANDOM
+            self.wallhaven_method = "random"
         
         # Reset and load images with new sorting
         self._load_images(reset=True)
