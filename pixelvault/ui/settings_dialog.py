@@ -42,6 +42,7 @@ class SettingsDialog(Gtk.Dialog):
         self._create_general_tab(notebook)
         self._create_auto_download_tab(notebook)
         self._create_wallhaven_tab(notebook)
+        self._create_nekosmoe_tab(notebook)
         
         self.show_all()
     
@@ -263,6 +264,93 @@ class SettingsDialog(Gtk.Dialog):
         tab_label = Gtk.Label.new("Wallhaven API")
         notebook.append_page(grid, tab_label)
     
+    def _create_nekosmoe_tab(self, notebook):
+        """Create the nekos.moe settings tab.
+        
+        Args:
+            notebook: Notebook widget to add the tab to
+        """
+        grid = Gtk.Grid()
+        grid.set_column_spacing(10)
+        grid.set_row_spacing(10)
+        grid.set_margin_top(10)
+        grid.set_margin_bottom(10)
+        grid.set_margin_start(10)
+        grid.set_margin_end(10)
+        
+        row = 0
+        
+        # Title/Header
+        header_label = Gtk.Label()
+        header_label.set_markup("<b>Nekos.moe API Settings</b>")
+        header_label.set_halign(Gtk.Align.START)
+        grid.attach(header_label, 0, row, 2, 1)
+        
+        row += 1
+        
+        # Info label
+        info_label = Gtk.Label()
+        info_label.set_markup(
+            "Enter your nekos.moe API token to access:\n"
+            "• Your favorites\n"
+            "• NSFW content (if enabled in your account)\n"
+            "• Upload capabilities\n\n"
+            "Get your API token from: <a href='https://nekos.moe'>https://nekos.moe</a>\n"
+            "(Log in and get your token from local storage)"
+        )
+        info_label.set_line_wrap(True)
+        info_label.set_xalign(0)
+        info_label.set_margin_bottom(10)
+        grid.attach(info_label, 0, row, 2, 1)
+        
+        row += 1
+        
+        # API Key input
+        api_key_label = Gtk.Label.new("API Token:")
+        api_key_label.set_halign(Gtk.Align.START)
+        
+        self.nekosmoe_api_key_entry = Gtk.Entry()
+        self.nekosmoe_api_key_entry.set_text(settings.get("nekosmoe_api_key", ""))
+        self.nekosmoe_api_key_entry.set_hexpand(True)
+        self.nekosmoe_api_key_entry.set_visibility(False)  # Hide the API key (like a password)
+        self.nekosmoe_api_key_entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+        
+        # Show/Hide toggle button for API key
+        show_button = Gtk.ToggleButton()
+        show_icon = Gio.ThemedIcon(name="view-reveal-symbolic")
+        show_image = Gtk.Image.new_from_gicon(show_icon, Gtk.IconSize.BUTTON)
+        show_button.add(show_image)
+        show_button.set_tooltip_text("Show/Hide API Token")
+        show_button.connect("toggled", self._on_show_nekosmoe_api_key_toggled)
+        
+        api_key_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        api_key_box.pack_start(self.nekosmoe_api_key_entry, True, True, 0)
+        api_key_box.pack_start(show_button, False, False, 0)
+        
+        grid.attach(api_key_label, 0, row, 1, 1)
+        grid.attach(api_key_box, 1, row, 1, 1)
+        
+        row += 1
+        
+        # Test API Key button
+        test_button = Gtk.Button.new_with_label("Test API Token")
+        test_button.connect("clicked", self._on_test_nekosmoe_api_key_clicked)
+        test_button.set_margin_top(10)
+        
+        grid.attach(test_button, 1, row, 1, 1)
+        
+        row += 1
+        
+        # Status indicator
+        self.nekosmoe_api_status_label = Gtk.Label()
+        self.nekosmoe_api_status_label.set_markup("")
+        self.nekosmoe_api_status_label.set_halign(Gtk.Align.START)
+        grid.attach(self.nekosmoe_api_status_label, 0, row, 2, 1)
+        
+        # Create tab
+        tab_label = Gtk.Label.new("Nekos.moe API")
+        notebook.append_page(grid, tab_label)
+    
     def _on_auto_download_toggled(self, switch, gparam):
         """Handle auto download toggle.
         
@@ -463,6 +551,76 @@ class SettingsDialog(Gtk.Dialog):
             # Re-enable the button
             GLib.idle_add(lambda: button.set_sensitive(True))
     
+    def _on_show_nekosmoe_api_key_toggled(self, button):
+        """Toggle the visibility of the nekos.moe API key.
+        
+        Args:
+            button: The ToggleButton widget
+        """
+        self.nekosmoe_api_key_entry.set_visibility(button.get_active())
+    
+    def _on_test_nekosmoe_api_key_clicked(self, button):
+        """Test the nekos.moe API key.
+        
+        Args:
+            button: The Button widget
+        """
+        api_key = self.nekosmoe_api_key_entry.get_text().strip()
+        if not api_key:
+            self.nekosmoe_api_status_label.set_markup("<span foreground='red'>Please enter an API token</span>")
+            return
+        
+        # Disable button during test
+        button.set_sensitive(False)
+        self.nekosmoe_api_status_label.set_markup("<span foreground='blue'>Testing API token...</span>")
+        
+        # Run the test in a background thread
+        thread = threading.Thread(target=self._test_nekosmoe_api_key, args=(api_key, button))
+        thread.daemon = True
+        thread.start()
+    
+    def _test_nekosmoe_api_key(self, api_key, button):
+        """Test the nekos.moe API key in a background thread.
+        
+        Args:
+            api_key: The API key to test
+            button: The button to re-enable after testing
+        """
+        from ..api.nekosmoe import NekosMoeAPI
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import GLib
+        
+        try:
+            # Create a new nekos.moe API client with the token
+            api = NekosMoeAPI(token=api_key)
+            
+            # Try to search for images (should work with any token)
+            response = api.search_images(limit=1)
+            
+            # Check if we got a valid response
+            if "images" in response and isinstance(response["images"], list):
+                GLib.idle_add(
+                    lambda: self.nekosmoe_api_status_label.set_markup(
+                        "<span foreground='green'>✓ API token accepted</span>"
+                    )
+                )
+            else:
+                GLib.idle_add(
+                    lambda: self.nekosmoe_api_status_label.set_markup(
+                        "<span foreground='red'>❌ Invalid response from API</span>"
+                    )
+                )
+        except Exception as e:
+            GLib.idle_add(
+                lambda: self.nekosmoe_api_status_label.set_markup(
+                    f"<span foreground='red'>❌ Error: {str(e)}</span>"
+                )
+            )
+        finally:
+            # Re-enable the button
+            GLib.idle_add(lambda: button.set_sensitive(True))
+    
     def save_settings(self):
         """Save settings from the dialog."""
         # Get previous auto-download setting to check if it changed
@@ -506,6 +664,10 @@ class SettingsDialog(Gtk.Dialog):
         # Wallhaven API key
         api_key = self.api_key_entry.get_text().strip()
         settings.set("wallhaven_api_key", api_key)
+        
+        # Nekos.moe API key
+        nekosmoe_api_key = self.nekosmoe_api_key_entry.get_text().strip()
+        settings.set("nekosmoe_api_key", nekosmoe_api_key)
         
         # Force save the settings to ensure they're written to disk
         settings.save() 

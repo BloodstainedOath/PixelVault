@@ -66,6 +66,13 @@ class MainWindow(Gtk.Window):
         # Search query
         self.search_query = ""
         
+        # Selected tags and purity
+        self.selected_tags = []
+        self.selected_purity = ["sfw"]  # Default to SFW content
+        
+        # Initialize nekos.moe sort parameter
+        self.nekosmoe_sort = "newest"  # Default sort for nekos.moe
+        
         # Additional filters for Wallhaven
         self.wallhaven_category = WallhavenCategory.from_list(settings.get("wallhaven_categories", ["general", "anime", "people"]))
         self.wallhaven_purity = WallhavenPurity.from_list(settings.get("wallhaven_purity", ["sfw"]))
@@ -108,10 +115,18 @@ class MainWindow(Gtk.Window):
         
         # Set search bar visibility based on current source
         if self.source_manager.current_source == ImageSource.WALLHAVEN:
-            self.wallhaven_search_box.show_all()
+            self.wallhaven_search_box.show_all()  # Show search bar for Wallhaven
+            self.wallhaven_search_entry.set_placeholder_text("Search Wallhaven...")
+            # Show sort options for Wallhaven
+            self.sort_combo.set_sensitive(True)
+        elif self.source_manager.current_source == ImageSource.NEKOSMOE:
+            self.wallhaven_search_box.show_all()  # Show search bar for Nekos.moe
+            self.wallhaven_search_entry.set_placeholder_text("Search Nekos.moe...")
+            # Show sort options for Nekos.moe
             self.sort_combo.set_sensitive(True)
         else:
-            self.wallhaven_search_box.hide()
+            self.wallhaven_search_box.hide()  # Hide search bar for other sources
+            # Hide sort options for Waifu.im
             self.sort_combo.set_sensitive(False)
     
     def _create_header_bar(self):
@@ -125,6 +140,7 @@ class MainWindow(Gtk.Window):
         source_store.append(["Wallhaven"])
         source_store.append(["Waifu.im"])
         source_store.append(["Waifu.pics"])
+        source_store.append(["Nekos.moe"])
         
         self.source_combo = Gtk.ComboBox.new_with_model(source_store)
         renderer_text = Gtk.CellRendererText()
@@ -362,6 +378,8 @@ class MainWindow(Gtk.Window):
             if source_text == "Wallhaven":
                 self.source_manager.set_source(ImageSource.WALLHAVEN)
                 self.wallhaven_search_box.show_all()  # Show search bar for Wallhaven
+                # Update search placeholder text
+                self.wallhaven_search_entry.set_placeholder_text("Search Wallhaven...")
                 # Show sort options for Wallhaven
                 self.sort_combo.set_sensitive(True)
             elif source_text == "Waifu.im":
@@ -375,6 +393,15 @@ class MainWindow(Gtk.Window):
                 self.wallhaven_search_box.hide()  # Hide search bar for Waifu.pics
                 # Hide sort options for Waifu.pics
                 self.sort_combo.set_sensitive(False)
+            elif source_text == "Nekos.moe":
+                print("Setting source to Nekos.moe")
+                self.source_manager.set_source(ImageSource.NEKOSMOE)
+                # Show search bar for Nekos.moe since it supports search
+                self.wallhaven_search_box.show_all()
+                # Update search placeholder text
+                self.wallhaven_search_entry.set_placeholder_text("Search Nekos.moe...")
+                # Show sort options for Nekos.moe as it supports sorting
+                self.sort_combo.set_sensitive(True)
             
             # Clear selected tags when changing source
             self.selected_tags = []
@@ -1290,6 +1317,20 @@ class MainWindow(Gtk.Window):
             # For Waifu.pics, we need to specify whether to include NSFW content
             print(f"Fetching Waifu.pics images with tags: {self.selected_tags}")
             params["is_nsfw"] = "nsfw" in self.selected_purity
+        
+        elif source_name == "Nekos.moe":
+            # For Nekos.moe, add specific parameters
+            params["is_nsfw"] = "nsfw" in self.selected_purity
+            
+            # Add search query if available
+            if self.search_query:
+                params["query"] = self.search_query
+                
+            # Add sort parameter
+            if self.nekosmoe_sort == "random":
+                params["method"] = "random"
+            else:
+                params["sort"] = self.nekosmoe_sort
         
         # Get images based on parameters
         response = self.source_manager.get_images(
@@ -2436,22 +2477,30 @@ class MainWindow(Gtk.Window):
         Args:
             combo: The ComboBox widget
         """
-        # Only applies to Wallhaven source
-        if self.source_manager.current_source != ImageSource.WALLHAVEN:
-            return
-            
         active = combo.get_active()
         
-        # Update sorting based on selection
-        if active == 0:  # Latest
-            self.wallhaven_sorting = WallhavenSorting.DATE_ADDED
-            self.wallhaven_method = "latest"
-        elif active == 1:  # Top
-            self.wallhaven_sorting = WallhavenSorting.TOPLIST
-            self.wallhaven_method = "top"
-        elif active == 2:  # Random
-            self.wallhaven_sorting = WallhavenSorting.RANDOM
-            self.wallhaven_method = "random"
+        # Handle Wallhaven source
+        if self.source_manager.current_source == ImageSource.WALLHAVEN:
+            # Update sorting based on selection
+            if active == 0:  # Latest
+                self.wallhaven_sorting = WallhavenSorting.DATE_ADDED
+                self.wallhaven_method = "latest"
+            elif active == 1:  # Top
+                self.wallhaven_sorting = WallhavenSorting.TOPLIST
+                self.wallhaven_method = "top"
+            elif active == 2:  # Random
+                self.wallhaven_sorting = WallhavenSorting.RANDOM
+                self.wallhaven_method = "random"
+        
+        # Handle Nekos.moe source
+        elif self.source_manager.current_source == ImageSource.NEKOSMOE:
+            # Map sort options to nekos.moe sort methods
+            if active == 0:  # Latest
+                self.nekosmoe_sort = "newest"
+            elif active == 1:  # Top
+                self.nekosmoe_sort = "likes"
+            elif active == 2:  # Random
+                self.nekosmoe_sort = "random"
         
         # Reset and load images with new sorting
         self._load_images(reset=True)
@@ -2466,27 +2515,44 @@ class MainWindow(Gtk.Window):
         response = dialog.run()
         
         if response == Gtk.ResponseType.OK:
-            # Get the previous API key before saving
-            previous_api_key = settings.get("wallhaven_api_key", "")
+            # Get the previous API keys before saving
+            previous_wallhaven_key = settings.get("wallhaven_api_key", "")
+            previous_nekosmoe_key = settings.get("nekosmoe_api_key", "")
             
             # Save settings
             dialog.save_settings()
             
             # Check if Wallhaven API key changed
-            new_api_key = settings.get("wallhaven_api_key", "")
-            if new_api_key != previous_api_key:
+            new_wallhaven_key = settings.get("wallhaven_api_key", "")
+            if new_wallhaven_key != previous_wallhaven_key:
                 # Update the API client
-                self.source_manager.update_wallhaven_api_key(new_api_key)
+                self.source_manager.update_wallhaven_api_key(new_wallhaven_key)
                 
                 # Refresh images if currently using Wallhaven
                 if self.source_manager.current_source == ImageSource.WALLHAVEN:
                     self._load_images(reset=True)
                     
                     # Show a status message
-                    if new_api_key:
+                    if new_wallhaven_key:
                         self.status_label.set_text("Wallhaven API key updated. Refreshing images.")
                     else:
                         self.status_label.set_text("Wallhaven API key removed. Refreshing images.")
+            
+            # Check if Nekos.moe API key changed
+            new_nekosmoe_key = settings.get("nekosmoe_api_key", "")
+            if new_nekosmoe_key != previous_nekosmoe_key:
+                # Update the API client
+                self.source_manager.update_nekosmoe_api_key(new_nekosmoe_key)
+                
+                # Refresh images if currently using Nekos.moe
+                if self.source_manager.current_source == ImageSource.NEKOSMOE:
+                    self._load_images(reset=True)
+                    
+                    # Show a status message
+                    if new_nekosmoe_key:
+                        self.status_label.set_text("Nekos.moe API token updated. Refreshing images.")
+                    else:
+                        self.status_label.set_text("Nekos.moe API token removed. Refreshing images.")
         
         dialog.destroy()
 
@@ -2503,7 +2569,12 @@ class MainWindow(Gtk.Window):
         # Open settings dialog
         settings_dialog = SettingsDialog(self)
         
-        # Select the Wallhaven API tab (index 2)
+        # Determine which API tab to select based on current source
+        tab_index = 2  # Default to Wallhaven API tab (index 2)
+        if self.source_manager.current_source == ImageSource.NEKOSMOE:
+            tab_index = 3  # Nekos.moe API tab (index 3)
+        
+        # Select the appropriate API tab
         notebook = None
         for child in settings_dialog.get_content_area().get_children():
             if isinstance(child, Gtk.Notebook):
@@ -2511,22 +2582,31 @@ class MainWindow(Gtk.Window):
                 break
         
         if notebook:
-            notebook.set_current_page(2)  # API tab is index 2
+            notebook.set_current_page(tab_index)
         
         response = settings_dialog.run()
         
         if response == Gtk.ResponseType.OK:
-            # Get the previous API key before saving
-            previous_api_key = settings.get("wallhaven_api_key", "")
+            # Get the previous API keys before saving
+            previous_wallhaven_key = settings.get("wallhaven_api_key", "")
+            previous_nekosmoe_key = settings.get("nekosmoe_api_key", "")
             
             # Save settings
             settings_dialog.save_settings()
             
-            # Check if Wallhaven API key changed
-            new_api_key = settings.get("wallhaven_api_key", "")
-            if new_api_key != previous_api_key:
-                # Update the API client
-                self.source_manager.update_wallhaven_api_key(new_api_key)
+            # Update the appropriate API client based on current source
+            if self.source_manager.current_source == ImageSource.WALLHAVEN:
+                # Check if Wallhaven API key changed
+                new_wallhaven_key = settings.get("wallhaven_api_key", "")
+                if new_wallhaven_key != previous_wallhaven_key:
+                    # Update the API client
+                    self.source_manager.update_wallhaven_api_key(new_wallhaven_key)
+            elif self.source_manager.current_source == ImageSource.NEKOSMOE:
+                # Check if Nekos.moe API key changed
+                new_nekosmoe_key = settings.get("nekosmoe_api_key", "")
+                if new_nekosmoe_key != previous_nekosmoe_key:
+                    # Update the API client
+                    self.source_manager.update_nekosmoe_api_key(new_nekosmoe_key)
         
         settings_dialog.destroy()
         

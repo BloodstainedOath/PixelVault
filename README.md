@@ -3,6 +3,7 @@
 A GTK-based wallpaper app that fetches images from multiple sources:
 - Wallhaven
 - Waifu.im
+- Nekos.moe
 
 ## Features
 - Switch between different wallpaper sources
@@ -73,10 +74,16 @@ PixelVault integrates with the following APIs:
 - Provides anime-style character images with various tags
 - See full documentation at https://docs.waifu.im/
 
+### Nekos.moe
+- Uses the API at https://nekos.moe/api/v1
+- Provides anime-style neko (catgirl) images
+- API token support for accessing NSFW content and favorites
+- Configure your API token in the Settings dialog
+
 ## Usage
 
 ### Basic Navigation
-- Use the Source dropdown to switch between Wallhaven and Waifu.im
+- Use the Source dropdown to switch between Wallhaven, Waifu.im, and Nekos.moe
 - For Wallhaven, use the Sort dropdown to sort by Latest, Top, or Random
 - Click on any image to open it in a larger view
 - From the image view, you can download the image or set it as wallpaper

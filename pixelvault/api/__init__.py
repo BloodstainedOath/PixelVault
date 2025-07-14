@@ -5,6 +5,7 @@ from enum import Enum, auto
 from .wallhaven import WallhavenAPI, Category as WallhavenCategory, Purity as WallhavenPurity
 from .waifuim import WaifuImAPI
 from .waifupics import WaifuPicsAPI
+from .nekosmoe import NekosMoeAPI
 from ..settings import settings
 
 class ImageSource(Enum):
@@ -12,6 +13,7 @@ class ImageSource(Enum):
     WALLHAVEN = auto()
     WAIFUIM = auto()
     WAIFUPICS = auto()
+    NEKOSMOE = auto()
 
 class SourceManager:
     """Manager for all image sources."""
@@ -20,11 +22,13 @@ class SourceManager:
         """Initialize the source manager with all API clients."""
         # Get API key from settings
         self.wallhaven_api_key = settings.get("wallhaven_api_key", "")
+        self.nekosmoe_api_key = settings.get("nekosmoe_api_key", "")
         
         # Initialize APIs
         self.wallhaven = WallhavenAPI(api_key=self.wallhaven_api_key if self.wallhaven_api_key else None)
         self.waifuim = WaifuImAPI()
         self.waifupics = WaifuPicsAPI()
+        self.nekosmoe = NekosMoeAPI(token=self.nekosmoe_api_key if self.nekosmoe_api_key else None)
         self.current_source = ImageSource.WALLHAVEN
         
         # Wallhaven random seed for maintaining consistency between pages
@@ -68,6 +72,9 @@ class SourceManager:
             "waifu", "neko", "trap", "blowjob"
         ]
         
+        # Cache for nekos.moe tags (will be populated on first use)
+        self._nekosmoe_tags = None
+        
     def update_wallhaven_api_key(self, api_key: str):
         """Update the Wallhaven API key.
         
@@ -80,6 +87,17 @@ class SourceManager:
             self.wallhaven = WallhavenAPI(api_key=api_key if api_key else None)
             # Clear the random seed
             self.wallhaven_random_seed = None
+    
+    def update_nekosmoe_api_key(self, api_key: str):
+        """Update the nekos.moe API key.
+        
+        Args:
+            api_key: The new API key
+        """
+        if api_key != self.nekosmoe_api_key:
+            self.nekosmoe_api_key = api_key
+            # Recreate the nekos.moe API client with the new key
+            self.nekosmoe = NekosMoeAPI(token=api_key if api_key else None)
     
     def set_source(self, source: ImageSource):
         """Set the current image source.
@@ -320,6 +338,82 @@ class SourceManager:
                 "images": images,
                 "pagination": pagination
             }
+            
+        elif self.current_source == ImageSource.NEKOSMOE:
+            # Get images from nekos.moe
+            is_nsfw = kwargs.get('is_nsfw', False)
+            query = kwargs.get('query', '')
+            
+            # Determine which method to use based on parameters
+            if query:
+                # If there's a search query, use search
+                response = self.nekosmoe.search_images(
+                    query=query,
+                    nsfw=is_nsfw,
+                    tags=tags,
+                    sort=kwargs.get('sort', 'newest'),
+                    skip=(page - 1) * 20,  # Calculate skip based on page number
+                    limit=20
+                )
+            elif kwargs.get('method') == 'random':
+                # For random method, use the random endpoint
+                response = self.nekosmoe.get_random_images(
+                    nsfw=is_nsfw,
+                    count=20
+                )
+            else:
+                # Default to search with sorting
+                response = self.nekosmoe.search_images(
+                    nsfw=is_nsfw,
+                    tags=tags,
+                    sort=kwargs.get('sort', 'newest'),
+                    skip=(page - 1) * 20,  # Calculate skip based on page number
+                    limit=20
+                )
+            
+            # Normalize nekos.moe response
+            images = []
+            pagination = {
+                "has_next_page": True,  # Assume there's more unless we know otherwise
+                "current_page": page,
+                "total_pages": page + 1  # We don't know total pages, so estimate
+            }
+            
+            # Process images from the response
+            image_list = response.get("images", [])
+            
+            # If we got fewer than the requested limit, we're at the end
+            if len(image_list) < 20:
+                pagination["has_next_page"] = False
+                pagination["total_pages"] = page
+            
+            for item in image_list:
+                try:
+                    # Construct URLs based on the image ID
+                    image_id = item.get("id", "")
+                    image_url = f"https://nekos.moe/image/{image_id}"
+                    
+                    image_data = {
+                        "id": image_id,
+                        "url": image_url,
+                        "preview": image_url,  # Same URL for preview
+                        "source": "",  # Source not provided
+                        "width": 0,  # Width not provided
+                        "height": 0,  # Height not provided
+                        "provider": "nekos.moe",
+                        "nsfw": item.get("nsfw", False),
+                        "tags": item.get("tags", [])
+                    }
+                    images.append(image_data)
+                except Exception as e:
+                    print(f"Error normalizing nekos.moe image data: {e}")
+                    print(f"Image data: {item}")
+                    continue
+            
+            return {
+                "images": images,
+                "pagination": pagination
+            }
         
         return {
             "images": [],
@@ -342,6 +436,8 @@ class SourceManager:
             return "Waifu.im"
         elif self.current_source == ImageSource.WAIFUPICS:
             return "Waifu.pics"
+        elif self.current_source == ImageSource.NEKOSMOE:
+            return "Nekos.moe"
         return "Unknown"
     
     def get_available_tags(self) -> List[Dict[str, Any]]:
@@ -415,6 +511,24 @@ class SourceManager:
                 })
             
             return result
+            
+        elif self.current_source == ImageSource.NEKOSMOE:
+            # If we haven't cached the tags yet, get them
+            if self._nekosmoe_tags is None:
+                # Get popular tags from the API
+                popular_tags = self.nekosmoe.get_popular_tags(limit=50)
+                
+                # Convert to the expected format
+                self._nekosmoe_tags = [
+                    {
+                        "name": tag,
+                        "description": f"Images tagged with {tag}",
+                        "category": "general"
+                    }
+                    for tag in popular_tags
+                ]
+            
+            return self._nekosmoe_tags
         
         return []
     
@@ -470,5 +584,21 @@ class SourceManager:
                 "time_ranges": [],
                 "color_filtering": False,
                 "tag_filtering": True  # Categories are implemented as tags
+            }
+        elif self.current_source == ImageSource.NEKOSMOE:
+            return {
+                "categories": False,
+                "purity_levels": True,  # SFW/NSFW toggle
+                "resolutions": False,
+                "aspect_ratios": False,
+                "sorting_options": [
+                    {"id": "newest", "name": "Newest"},
+                    {"id": "likes", "name": "Most Liked"},
+                    {"id": "oldest", "name": "Oldest"},
+                    {"id": "random", "name": "Random"}
+                ],
+                "time_ranges": [],
+                "color_filtering": False,
+                "tag_filtering": True
             }
         return {}
